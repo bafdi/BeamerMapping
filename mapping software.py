@@ -21,6 +21,7 @@ class MappingState:
     def __init__(self):
         self.norm_points = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]
         self.selected_point = None
+        self.selected_edge = None
         self.output_res = (800, 600)
 
 
@@ -31,10 +32,16 @@ class ProjectionStudio(ctk.CTk):
     def __init__(self):
         super().__init__()
 
-        self.title("Mapping Studio Pro")
-        self.geometry("1200x800")
+        self.title("Mapping Studio Pro V12.1 (Stability Fix)")
+        self.geometry("1250x850")
 
-        # State
+        # --- STABILITY FIX: Pygame einmalig starten ---
+        pygame.init()
+        # ----------------------------------------------
+
+        # Dragging Helper Variablen
+        self.drag_start_pos = None
+
         self.is_projecting = False
         self.cap = None
         self.sct = mss.mss()
@@ -49,7 +56,6 @@ class ProjectionStudio(ctk.CTk):
         self.preset_dir = os.path.join(os.getcwd(), "presets")
         if not os.path.exists(self.preset_dir): os.makedirs(self.preset_dir)
 
-        # UI Aufbauen
         self.grid_columnconfigure(1, weight=1)
         self.grid_rowconfigure(0, weight=1)
 
@@ -247,7 +253,8 @@ class ProjectionStudio(ctk.CTk):
 
     def toggle_projection(self):
         if not self.is_projecting:
-            self.start_projection()
+            # --- STABILITY FIX: Kurze Verzögerung ---
+            self.after(50, self.start_projection)
         else:
             self.stop_projection()
 
@@ -266,7 +273,7 @@ class ProjectionStudio(ctk.CTk):
         else:
             t_w, t_h = 800, 600
 
-        pygame.init()
+        # --- STABILITY FIX: Init bereits im __init__ gemacht ---
         self.clock = pygame.time.Clock()
 
         flags = pygame.DOUBLEBUF
@@ -275,6 +282,7 @@ class ProjectionStudio(ctk.CTk):
         else:
             flags |= pygame.RESIZABLE
 
+        # Fenster erstellen
         try:
             self.screen = pygame.display.set_mode((t_w, t_h), flags, display=out_idx)
         except TypeError:
@@ -282,9 +290,10 @@ class ProjectionStudio(ctk.CTk):
                 os.environ['SDL_VIDEO_WINDOW_POS'] = f"{self.monitors[out_idx]['left']},{self.monitors[out_idx]['top']}"
             self.screen = pygame.display.set_mode((t_w, t_h), flags)
 
-        # WICHTIG: Tatsächliche Größe nach OS-Eingriff holen (behebt die Warnung)
+        # Tatsächliche Größe holen (OS Resizing Fix)
         self.w, self.h = self.screen.get_size()
         state.output_res = (self.w, self.h)
+        print(f"Projection started at: {self.w}x{self.h}")
 
         if mode == "Screen":
             in_sel = self.combo_screens.get()
@@ -317,30 +326,77 @@ class ProjectionStudio(ctk.CTk):
     def stop_projection(self):
         self.is_projecting = False
         if self.cap: self.cap.release()
-        pygame.quit()
+
+        # --- STABILITY FIX: Nur Display beenden, nicht alles ---
+        pygame.display.quit()
+        # -----------------------------------------------------
+
         self.btn_start.configure(text="PROJEKTION STARTEN", fg_color="#00C853", hover_color="#009624")
         self.canvas.delete("all")
         self.update_preview()
 
+    # --- GEOMETRY HELPERS ---
+    def point_line_distance(self, p, a, b):
+        p, a, b = np.array(p), np.array(a), np.array(b)
+        ab = b - a
+        ap = p - a
+        if np.dot(ab, ab) == 0: return np.linalg.norm(ap)
+        t = np.clip(np.dot(ap, ab) / np.dot(ab, ab), 0, 1)
+        return np.linalg.norm(p - (a + t * ab))
+
+    def get_hit_item(self, nx, ny):
+        for i, p in enumerate(state.norm_points):
+            if np.hypot((p[0] - nx), (p[1] - ny)) < 0.03: return "point", i
+
+        num = len(state.norm_points)
+        for i in range(num):
+            p1, p2 = state.norm_points[i], state.norm_points[(i + 1) % num]
+            if self.point_line_distance([nx, ny], p1, p2) < 0.03: return "edge", i
+        return None, None
+
+    # --- CANVAS INTERACTION ---
     def on_canvas_click(self, event):
         cw, ch = self.canvas.winfo_width(), self.canvas.winfo_height()
-        min_dist = 1000
-        sel_idx = None
-        for i, (nx, ny) in enumerate(state.norm_points):
-            px, py = nx * cw, ny * ch
-            dist = np.hypot(px - event.x, py - event.y)
-            if dist < 20 and dist < min_dist:
-                min_dist, sel_idx = dist, i
-        state.selected_point = sel_idx
+        nx, ny = event.x / cw, event.y / ch
+
+        item_type, idx = self.get_hit_item(nx, ny)
+
+        if item_type == "point":
+            state.selected_point, state.selected_edge = idx, None
+        elif item_type == "edge":
+            state.selected_edge, state.selected_point = idx, None
+            self.drag_start_pos = (nx, ny)
+        else:
+            state.selected_point, state.selected_edge = None, None
+
+        self.update_preview()
 
     def on_canvas_drag(self, event):
+        cw, ch = self.canvas.winfo_width(), self.canvas.winfo_height()
+        nx, ny = max(0, min(1, event.x / cw)), max(0, min(1, event.y / ch))
+
         if state.selected_point is not None:
-            cw, ch = self.canvas.winfo_width(), self.canvas.winfo_height()
-            state.norm_points[state.selected_point] = [max(0, min(event.x, cw)) / cw, max(0, min(event.y, ch)) / ch]
+            state.norm_points[state.selected_point] = [nx, ny]
+            self.update_preview()
+
+        elif state.selected_edge is not None and self.drag_start_pos:
+            dx, dy = nx - self.drag_start_pos[0], ny - self.drag_start_pos[1]
+            i1, i2 = state.selected_edge, (state.selected_edge + 1) % 4
+            p1, p2 = state.norm_points[i1], state.norm_points[i2]
+
+            state.norm_points[i1] = [max(0, min(1, p1[0] + dx)), max(0, min(1, p1[1] + dy))]
+            state.norm_points[i2] = [max(0, min(1, p2[0] + dx)), max(0, min(1, p2[1] + dy))]
+
+            self.drag_start_pos = (nx, ny)
+            self.update_preview()
 
     def on_canvas_release(self, event):
         state.selected_point = None
+        state.selected_edge = None
+        self.drag_start_pos = None
+        self.update_preview()
 
+    # --- PROJECTION LOOP ---
     def projection_loop(self):
         if not self.is_projecting: return
         is_edit = self.switch_grid.get()
@@ -355,15 +411,33 @@ class ProjectionStudio(ctk.CTk):
             if is_edit:
                 if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                     mx, my = pygame.mouse.get_pos()
-                    nmx, nmy = mx / self.w, my / self.h
-                    dists = [np.hypot(p[0] - nmx, p[1] - nmy) for p in state.norm_points]
-                    if min(dists) < 0.05: state.selected_point = np.argmin(dists)
-                elif event.type == pygame.MOUSEMOTION and state.selected_point is not None and \
-                        pygame.mouse.get_pressed()[0]:
+                    nx, ny = mx / self.w, my / self.h
+
+                    item_type, idx = self.get_hit_item(nx, ny)
+                    if item_type == "point":
+                        state.selected_point, state.selected_edge = idx, None
+                    elif item_type == "edge":
+                        state.selected_edge, state.selected_point = idx, None
+                        self.drag_start_pos = (nx, ny)
+
+                elif event.type == pygame.MOUSEMOTION and pygame.mouse.get_pressed()[0]:
                     mx, my = pygame.mouse.get_pos()
-                    state.norm_points[state.selected_point] = [mx / self.w, my / self.h]
-                elif event.type == pygame.MOUSEBUTTONUP:  # --- HIER WAR DER FEHLER ---
+                    nx, ny = max(0, min(1, mx / self.w)), max(0, min(1, my / self.h))
+
+                    if state.selected_point is not None:
+                        state.norm_points[state.selected_point] = [nx, ny]
+                    elif state.selected_edge is not None and self.drag_start_pos:
+                        dx, dy = nx - self.drag_start_pos[0], ny - self.drag_start_pos[1]
+                        i1, i2 = state.selected_edge, (state.selected_edge + 1) % 4
+                        p1, p2 = state.norm_points[i1], state.norm_points[i2]
+                        state.norm_points[i1] = [max(0, min(1, p1[0] + dx)), max(0, min(1, p1[1] + dy))]
+                        state.norm_points[i2] = [max(0, min(1, p2[0] + dx)), max(0, min(1, p2[1] + dy))]
+                        self.drag_start_pos = (nx, ny)
+
+                elif event.type == pygame.MOUSEBUTTONUP:
                     state.selected_point = None
+                    state.selected_edge = None
+                    self.drag_start_pos = None
 
         pygame.mouse.set_visible(is_edit)
 
@@ -378,20 +452,29 @@ class ProjectionStudio(ctk.CTk):
                 ret, frame = self.cap.read()
 
         if frame is not None:
-            dst = np.float32([[p[0] * self.w, p[1] * self.h] for p in state.norm_points])
-            M = cv2.getPerspectiveTransform(self.src_points, dst)
-            warped = cv2.warpPerspective(frame, M, (self.w, self.h), flags=cv2.INTER_LANCZOS4)
+            # WICHTIG: Prüfen ob das Surface noch lebt (Stability)
+            try:
+                dst = np.float32([[p[0] * self.w, p[1] * self.h] for p in state.norm_points])
+                M = cv2.getPerspectiveTransform(self.src_points, dst)
+                warped = cv2.warpPerspective(frame, M, (self.w, self.h), flags=cv2.INTER_LANCZOS4)
 
-            surf = pygame.surfarray.make_surface(cv2.transpose(cv2.cvtColor(warped, cv2.COLOR_BGR2RGB)))
-            self.screen.blit(surf, (0, 0))
+                surf = pygame.surfarray.make_surface(cv2.transpose(cv2.cvtColor(warped, cv2.COLOR_BGR2RGB)))
+                self.screen.blit(surf, (0, 0))
 
-            if is_edit:
-                pts = [(int(p[0]), int(p[1])) for p in dst]
-                pygame.draw.lines(self.screen, (0, 255, 255), True, pts, 3)
-                for i, p in enumerate(pts):
-                    col = (255, 0, 0) if i == state.selected_point else (0, 255, 0)
-                    pygame.draw.circle(self.screen, col, p, 12)
-            pygame.display.flip()
+                if is_edit:
+                    pts = [(int(p[0]), int(p[1])) for p in dst]
+                    for i in range(4):
+                        col = (255, 255, 0) if state.selected_edge == i else (0, 255, 255)
+                        pygame.draw.line(self.screen, col, pts[i], pts[(i + 1) % 4], 4)
+                    for i, p in enumerate(pts):
+                        col = (255, 0, 0) if i == state.selected_point else (0, 255, 0)
+                        pygame.draw.circle(self.screen, col, p, 10)
+
+                pygame.display.flip()
+            except pygame.error:
+                # Fenster wurde wohl geschlossen
+                self.stop_projection()
+                return
 
         self.update_preview()
         self.after(16, self.projection_loop)
@@ -399,14 +482,20 @@ class ProjectionStudio(ctk.CTk):
     def update_preview(self):
         self.canvas.delete("all")
         cw, ch = self.canvas.winfo_width(), self.canvas.winfo_height()
-        poly = []
-        for i, (nx, ny) in enumerate(state.norm_points):
-            px, py = nx * cw, ny * ch
-            poly.extend([px, py])
+
+        pts_px = [(nx * cw, ny * ch) for nx, ny in state.norm_points]
+
+        # Kanten
+        for i in range(4):
+            p1, p2 = pts_px[i], pts_px[(i + 1) % 4]
+            fill = "#FFD600" if state.selected_edge == i else "#29B6F6"
+            width = 4 if state.selected_edge == i else 2
+            self.canvas.create_line(p1[0], p1[1], p2[0], p2[1], fill=fill, width=width)
+
+        # Punkte
+        for i, (px, py) in enumerate(pts_px):
             col = "#00C853" if i == state.selected_point else "#29B6F6"
             self.canvas.create_oval(px - 6, py - 6, px + 6, py + 6, fill=col, outline="white")
-        if len(poly) == 8:
-            self.canvas.create_polygon(poly, outline="#29B6F6", fill="", width=2, dash=(5, 3))
 
         if not self.is_projecting:
             self.canvas.create_text(20, 20, anchor="nw", text="LIVE VORSCHAU", fill="white", font=("Arial", 12, "bold"))

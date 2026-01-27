@@ -8,14 +8,14 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 
-# --- HELPER KLASSE FÜR BI-DIREKTIONALE KOMMUNIKATION ---
+# --- STATE CLASS (Datenhaltung) ---
 class MappingState:
     def __init__(self):
-        # Standard Punkte (werden später an Auflösung angepasst)
-        self.dst_points = [[100, 100], [400, 100], [400, 400], [100, 400]]
+        # Wir speichern Punkte relativ (0.0 bis 1.0), damit sie unabhängig von der Auflösung sind
+        # Das macht das Umschalten zwischen Preview und Beamer viel leichter
+        self.norm_points = [[0.1, 0.1], [0.9, 0.1], [0.9, 0.9], [0.1, 0.9]]
         self.selected_point = None
-        self.output_res = (800, 600)  # Platzhalter
-        self.monitor_offset = (0, 0)
+        self.output_res = (800, 600)
 
 
 state = MappingState()
@@ -24,25 +24,30 @@ state = MappingState()
 class ProjectionStudio:
     def __init__(self):
         self.root = tk.Tk()
-        self.root.title("Mapping Studio Pro")
-        self.root.geometry("900x500")  # Breiter für Preview
+        self.root.title("Mapping Studio V3")
+        self.root.geometry("1000x550")
 
         self.is_projecting = False
         self.cap = None
         self.sct = mss.mss()
-        self.monitors = self.sct.monitors[1:]  # Monitor 1+
+        try:
+            self.monitors = self.sct.monitors[1:]  # Monitor 1+
+        except Exception:
+            self.monitors = []  # Fallback falls mss failt
 
-        # --- GUI LAYOUT ---
-        # Links: Settings | Rechts: Preview
+        self.current_mode = None
+        self.build_ui()
+
+    def build_ui(self):
+        # Layout Split
         left_panel = ttk.Frame(self.root, padding=10)
-        left_panel.pack(side="left", fill="y")
+        left_panel.pack(side="left", fill="y", padx=5)
 
-        right_panel = ttk.LabelFrame(self.root, text="Live Form Preview", padding=10)
+        right_panel = ttk.LabelFrame(self.root, text="Interaktive Vorschau (Hier ziehen!)", padding=10)
         right_panel.pack(side="right", fill="both", expand=True, padx=10, pady=10)
 
-        # --- 1. SETTINGS (LINKS) ---
-        ttk.Label(left_panel, text="INPUT QUELLE", font=("Arial", 10, "bold")).pack(anchor="w", pady=(0, 5))
-
+        # --- SETTINGS ---
+        ttk.Label(left_panel, text="1. QUELLER (INPUT)", font=("Arial", 10, "bold")).pack(anchor="w")
         self.source_mode = tk.StringVar(value="file")
         ttk.Radiobutton(left_panel, text="Videodatei", variable=self.source_mode, value="file").pack(anchor="w")
         ttk.Radiobutton(left_panel, text="Screen Capture", variable=self.source_mode, value="screen").pack(anchor="w")
@@ -52,16 +57,15 @@ class ProjectionStudio:
         ttk.Button(left_panel, text="Datei wählen...", command=self.browse_file).pack(fill="x", pady=5)
         ttk.Label(left_panel, textvariable=self.file_path, font=("Arial", 8), foreground="gray").pack(fill="x")
 
-        # Monitor Auswahl Input
-        ttk.Label(left_panel, text="Input Monitor (für Screen Capture):").pack(anchor="w", pady=(10, 0))
+        # Input Monitor Combo
         self.mon_names = [f"Monitor {i + 1} ({m['width']}x{m['height']})" for i, m in enumerate(self.monitors)]
         self.cb_input_mon = ttk.Combobox(left_panel, values=self.mon_names, state="readonly")
         if self.mon_names: self.cb_input_mon.current(0)
-        self.cb_input_mon.pack(fill="x")
+        self.cb_input_mon.pack(fill="x", pady=(5, 15))
 
-        ttk.Separator(left_panel, orient="horizontal").pack(fill="x", pady=20)
+        ttk.Separator(left_panel, orient="horizontal").pack(fill="x", pady=10)
 
-        ttk.Label(left_panel, text="OUTPUT ZIEL (BEAMER)", font=("Arial", 10, "bold")).pack(anchor="w")
+        ttk.Label(left_panel, text="2. ZIEL (OUTPUT)", font=("Arial", 10, "bold")).pack(anchor="w")
         self.cb_output_mon = ttk.Combobox(left_panel, values=self.mon_names, state="readonly")
         if len(self.mon_names) > 1:
             self.cb_output_mon.current(1)
@@ -69,22 +73,24 @@ class ProjectionStudio:
             self.cb_output_mon.current(0)
         self.cb_output_mon.pack(fill="x", pady=5)
 
+        # Fullscreen Checkbox
+        self.use_fullscreen = tk.BooleanVar(value=True)
+        ttk.Checkbutton(left_panel, text="Vollbild Modus", variable=self.use_fullscreen).pack(anchor="w", pady=5)
+
         self.btn_start = ttk.Button(left_panel, text="PROJEKTION STARTEN", command=self.toggle_projection)
         self.btn_start.pack(fill="x", pady=20)
 
-        ttk.Label(left_panel, text="Steuerung:\n'M' = Toggle Maus/UI\n'Q' = Stop", foreground="gray").pack(
-            side="bottom")
-
-        # --- 2. PREVIEW (RECHTS) ---
-        # Canvas zeichnet die Form nach
-        self.canvas = tk.Canvas(right_panel, bg="black", width=400, height=300)
+        # --- PREVIEW CANVAS ---
+        self.canvas = tk.Canvas(right_panel, bg="black", width=500, height=400, cursor="crosshair")
         self.canvas.pack(fill="both", expand=True)
-        # Wir speichern die Skalierung für die Vorschau
-        self.preview_scale_x = 1.0
-        self.preview_scale_y = 1.0
+
+        # Canvas Events für Maus-Interaktion
+        self.canvas.bind("<Button-1>", self.on_canvas_click)
+        self.canvas.bind("<B1-Motion>", self.on_canvas_drag)
+        self.canvas.bind("<ButtonRelease-1>", self.on_canvas_release)
 
     def browse_file(self):
-        f = filedialog.askopenfilename(filetypes=[("Video", "*.mp4 *.mov *.avi")])
+        f = filedialog.askopenfilename(filetypes=[("Video", "*.mp4 *.mov *.avi *.mkv")])
         if f: self.file_path.set(f)
 
     def toggle_projection(self):
@@ -94,51 +100,65 @@ class ProjectionStudio:
             self.stop_projection()
 
     def start_projection(self):
-        # 1. Config lesen
-        mode = self.source_mode.get()
-        out_idx = self.cb_output_mon.current()
-        out_mon = self.monitors[out_idx]
+        self.current_mode = self.source_mode.get()
 
-        # Environment Variable für Fensterposition setzen
-        os.environ['SDL_VIDEO_WINDOW_POS'] = f"{out_mon['left']},{out_mon['top']}"
+        # Validierung
+        if self.current_mode == "file" and not self.file_path.get():
+            messagebox.showerror("Fehler", "Bitte Datei wählen!")
+            return
 
-        # 2. Pygame Init
+        # Output Monitor Setup
+        if self.monitors:
+            out_idx = self.cb_output_mon.current()
+            out_mon = self.monitors[out_idx]
+            # Fensterposition setzen (wichtig für Multimonitor)
+            os.environ['SDL_VIDEO_WINDOW_POS'] = f"{out_mon['left']},{out_mon['top']}"
+            target_w, target_h = out_mon['width'], out_mon['height']
+        else:
+            target_w, target_h = 800, 600  # Fallback
+
+        # Pygame Init
         pygame.init()
-        self.w, self.h = out_mon['width'], out_mon['height']
+
+        if self.use_fullscreen.get():
+            # Vollbild / Rahmenlos auf Zielmonitor
+            self.w, self.h = target_w, target_h
+            self.screen = pygame.display.set_mode((self.w, self.h), pygame.NOFRAME | pygame.DOUBLEBUF)
+        else:
+            # Fenstermodus (kleiner zum Testen)
+            self.w, self.h = 800, 600
+            self.screen = pygame.display.set_mode((self.w, self.h), pygame.RESIZABLE | pygame.DOUBLEBUF)
+
         state.output_res = (self.w, self.h)
-
-        # Reset Punkte auf Ecken (leicht eingerückt)
-        m = 100
-        state.dst_points = [
-            [m, m], [self.w - m, m], [self.w - m, self.h - m], [m, self.h - m]
-        ]
-
-        self.screen = pygame.display.set_mode((self.w, self.h), pygame.NOFRAME | pygame.DOUBLEBUF)
-        pygame.display.set_caption("Mapping Output")
+        pygame.display.set_caption("Beamer Output")
         self.clock = pygame.time.Clock()
 
-        # 3. Quelle öffnen
-        if mode == "screen":
-            in_idx = self.cb_input_mon.current()
-            self.input_rect = self.monitors[in_idx]
-            self.vid_w, self.vid_h = self.input_rect["width"], self.input_rect["height"]
+        # Quelle öffnen
+        if self.current_mode == "screen":
+            if self.monitors:
+                in_idx = self.cb_input_mon.current()
+                self.input_rect = self.monitors[in_idx]
+                self.vid_w, self.vid_h = self.input_rect["width"], self.input_rect["height"]
+            else:
+                messagebox.showerror("Error", "Keine Monitore gefunden für Screen Capture")
+                return
         else:
-            path = self.file_path.get() if mode == "file" else 0
-            self.cap = cv2.VideoCapture(path)
+            src = self.file_path.get() if self.current_mode == "file" else 0
+            self.cap = cv2.VideoCapture(src)
             if not self.cap.isOpened():
-                messagebox.showerror("Fehler", "Quelle konnte nicht geöffnet werden")
+                messagebox.showerror("Error", "Videoquelle defekt")
+                pygame.quit()
                 return
             self.vid_w = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
             self.vid_h = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
         self.src_points = np.float32([[0, 0], [self.vid_w, 0], [self.vid_w, self.vid_h], [0, self.vid_h]])
 
-        # UI Update
         self.is_projecting = True
         self.btn_start.config(text="STOP")
         self.show_ui = True
 
-        # Start Loop via Tkinter 'after'
+        # Start Loop
         self.projection_loop()
 
     def stop_projection(self):
@@ -146,113 +166,132 @@ class ProjectionStudio:
         if self.cap: self.cap.release()
         pygame.quit()
         self.btn_start.config(text="PROJEKTION STARTEN")
-        # Canvas reset
         self.canvas.delete("all")
 
+    # --- CANVAS INTERAKTION (TKINTER) ---
+    def on_canvas_click(self, event):
+        # Finde nächsten Punkt im Canvas
+        cw, ch = self.canvas.winfo_width(), self.canvas.winfo_height()
+        click_x, click_y = event.x, event.y
+
+        min_dist = 1000
+        sel_idx = None
+
+        for i, (nx, ny) in enumerate(state.norm_points):
+            # Rechne normalisierte Punkte (0-1) auf Canvas Größe um
+            px = nx * cw
+            py = ny * ch
+            dist = np.hypot(px - click_x, py - click_y)
+            if dist < 20:  # Fangradius
+                if dist < min_dist:
+                    min_dist = dist
+                    sel_idx = i
+
+        state.selected_point = sel_idx
+
+    def on_canvas_drag(self, event):
+        if state.selected_point is not None:
+            cw, ch = self.canvas.winfo_width(), self.canvas.winfo_height()
+            # Begrenze auf Canvas
+            ex = max(0, min(event.x, cw))
+            ey = max(0, min(event.y, ch))
+
+            # Speichere als normalisierte Koordinate (0.0 - 1.0)
+            state.norm_points[state.selected_point] = [ex / cw, ey / ch]
+
+    def on_canvas_release(self, event):
+        state.selected_point = None
+
+    # --- MAIN LOOP ---
     def projection_loop(self):
         if not self.is_projecting: return
 
-        # --- A. PYGAME LOGIK ---
-        # Input Handling
+        # 1. PYGAME EVENTS (Maus auf Beamer Fenster)
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 self.stop_projection(); return
             elif event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_q or event.key == pygame.K_ESCAPE:
-                    self.stop_projection(); return
-                elif event.key == pygame.K_m:
-                    self.show_ui = not self.show_ui
-                    pygame.mouse.set_visible(self.show_ui)
+                if event.key == pygame.K_q: self.stop_projection(); return
+                if event.key == pygame.K_m: self.show_ui = not self.show_ui
 
+            # Maus Interaktion im Pygame Fenster
             elif event.type == pygame.MOUSEBUTTONDOWN and self.show_ui:
                 if event.button == 1:
-                    m_pos = pygame.mouse.get_pos()
-                    pts = np.array(state.dst_points)
-                    dist = np.linalg.norm(pts - m_pos, axis=1)
-                    if np.min(dist) < 40: state.selected_point = np.argmin(dist)
+                    mx, my = pygame.mouse.get_pos()
+                    # Umrechnen in normalisierte Koordinaten für den Vergleich
+                    nmx, nmy = mx / self.w, my / self.h
+
+                    dists = [np.hypot(p[0] - nmx, p[1] - nmy) for p in state.norm_points]
+                    if min(dists) < 0.05:  # Toleranz relativ zur Größe
+                        state.selected_point = np.argmin(dists)
+
+            elif event.type == pygame.MOUSEMOTION and state.selected_point is not None:
+                # Nur wenn Maus im Pygame Fenster gedrückt ist
+                if pygame.mouse.get_pressed()[0]:
+                    mx, my = pygame.mouse.get_pos()
+                    state.norm_points[state.selected_point] = [mx / self.w, my / self.h]
 
             elif event.type == pygame.MOUSEBUTTONUP:
                 state.selected_point = None
 
-        if state.selected_point is not None:
-            # Mouse Limitieren auf Screen
-            mx, my = pygame.mouse.get_pos()
-            mx = max(0, min(mx, self.w))
-            my = max(0, min(my, self.h))
-            state.dst_points[state.selected_point] = [mx, my]
-
-        # Frame holen
+        # 2. BILD VERARBEITUNG
         frame = None
-        if self.source_mode.get() == "screen":
+        if self.current_mode == "screen":
             img = np.array(self.sct.grab(self.input_rect))
             frame = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
-        else:
+        elif self.cap:
             ret, frame = self.cap.read()
-            if not ret and self.source_mode.get() == "file":
+            if not ret and self.current_mode == "file":
                 self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
                 ret, frame = self.cap.read()
 
         if frame is not None:
-            # Warping
-            M = cv2.getPerspectiveTransform(self.src_points, np.float32(state.dst_points))
+            # Berechne Absolute Pixel Koordinaten aus den normalisierten Werten
+            dst_pixels = np.float32([[p[0] * self.w, p[1] * self.h] for p in state.norm_points])
+
+            M = cv2.getPerspectiveTransform(self.src_points, dst_pixels)
             warped = cv2.warpPerspective(frame, M, (self.w, self.h))
 
-            # Rendering
-            warped = cv2.cvtColor(warped, cv2.COLOR_BGR2RGB)
-            warped = cv2.transpose(warped)
-            surf = pygame.surfarray.make_surface(warped)
+            # Display
+            warped_rgb = cv2.cvtColor(warped, cv2.COLOR_BGR2RGB)
+            warped_rgb = cv2.transpose(warped_rgb)
+            surf = pygame.surfarray.make_surface(warped_rgb)
             self.screen.blit(surf, (0, 0))
 
-            # UI Overlay im Beamer-Fenster
             if self.show_ui:
-                pygame.draw.lines(self.screen, (0, 255, 255), True, state.dst_points, 2)
-                for i, p in enumerate(state.dst_points):
+                # Zeichne UI
+                pts = [(int(p[0]), int(p[1])) for p in dst_pixels]
+                pygame.draw.lines(self.screen, (0, 255, 255), True, pts, 2)
+                for i, p in enumerate(pts):
                     color = (255, 0, 0) if i == state.selected_point else (0, 255, 0)
-                    pygame.draw.circle(self.screen, color, (int(p[0]), int(p[1])), 10)
+                    pygame.draw.circle(self.screen, color, p, 10)
 
             pygame.display.flip()
 
-        # --- B. TKINTER PREVIEW UPDATE ---
-        self.update_preview_canvas()
-
-        # Loop am Leben erhalten (ca. 60 FPS -> 16ms)
+        # 3. PREVIEW UPDATE (TKINTER)
+        self.update_preview()
         self.root.after(16, self.projection_loop)
 
-    def update_preview_canvas(self):
-        """Zeichnet die Form im Tkinter Fenster basierend auf Pygame Koordinaten"""
+    def update_preview(self):
         self.canvas.delete("all")
+        cw, ch = self.canvas.winfo_width(), self.canvas.winfo_height()
 
-        # Berechne Skalierungsfaktor (Canvas Größe / Screen Größe)
-        cw = self.canvas.winfo_width()
-        ch = self.canvas.winfo_height()
-        sw, sh = state.output_res
+        # Umrechnen: Normalisiert -> Canvas Pixel
+        poly_pts = []
+        for i, (nx, ny) in enumerate(state.norm_points):
+            px, py = nx * cw, ny * ch
+            poly_pts.extend([px, py])
 
-        # Verhindere Division durch Null beim Start
-        if sw == 0 or cw <= 1: return
+            # Eckpunkt
+            col = "red" if i == state.selected_point else "#00ff00"
+            self.canvas.create_oval(px - 5, py - 5, px + 5, py + 5, fill=col, outline="black")
 
-        scale_x = cw / sw
-        scale_y = ch / sh
+        # Form füllen
+        if len(poly_pts) == 8:
+            self.canvas.create_polygon(poly_pts, outline="cyan", fill="", width=2, dash=(5, 3))
 
-        # Rahmen des Beamers zeichnen (als Referenz)
-        self.canvas.create_rectangle(2, 2, cw, ch, outline="gray", width=1)
-
-        # Mapped Polygon
-        poly_points = []
-        for p in state.dst_points:
-            px = p[0] * scale_x
-            py = p[1] * scale_y
-            poly_points.extend([px, py])
-
-            # Eckpunkte zeichnen
-            self.canvas.create_oval(px - 4, py - 4, px + 4, py + 4, fill="#00ff00", outline="")
-
-        # Polygon füllen (transparent simulieren durch stipple ist in Tkinter schwer, daher nur Outline)
-        if len(poly_points) == 8:
-            self.canvas.create_polygon(poly_points, outline="#00ccff", fill="", width=2)
-
-            # Optional: Halb-transparentes Füllen (Trick)
-            # Tkinter kann keine echte Transparenz, aber wir können ein Gittermuster (stipple) nehmen
-            self.canvas.create_polygon(poly_points, fill="cyan", stipple="gray25", outline="")
+        # Info Text
+        self.canvas.create_text(10, 10, anchor="nw", text="Output Preview", fill="white")
 
     def run(self):
         self.root.mainloop()

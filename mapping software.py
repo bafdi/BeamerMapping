@@ -4,6 +4,7 @@ import numpy as np
 import pygame
 import sys
 import mss
+import json  # WICHTIG: Für Save/Load
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
@@ -23,8 +24,8 @@ state = MappingState()
 class ProjectionStudio:
     def __init__(self):
         self.root = tk.Tk()
-        self.root.title("Mapping Studio V5 (Show Mode)")
-        self.root.geometry("1100x650")
+        self.root.title("Mapping Studio V5.1 (Save/Load)")
+        self.root.geometry("1100x700")
 
         self.is_projecting = False
         self.cap = None
@@ -76,15 +77,23 @@ class ProjectionStudio:
         self.cb_output_mon.pack(fill="x", pady=5)
 
         # --- VIEW OPTIONS ---
-        ttk.Label(left_panel, text="3. ANSICHT", font=("Arial", 10, "bold")).pack(anchor="w", pady=(15, 5))
+        ttk.Label(left_panel, text="3. ANSICHT & PRESETS", font=("Arial", 10, "bold")).pack(anchor="w", pady=(15, 5))
 
         self.use_fullscreen = tk.BooleanVar(value=True)
         ttk.Checkbutton(left_panel, text="Vollbild (Menüleiste ausblenden)", variable=self.use_fullscreen).pack(
             anchor="w")
 
-        # HIER IST DER NEUE SHOW MODE BUTTON
+        # Edit Mode Toggle
         ttk.Checkbutton(left_panel, text="Editier-Modus (Gitter anzeigen)", variable=self.show_overlays).pack(
             anchor="w", pady=5)
+
+        # --- NEU: SAVE & LOAD BUTTONS ---
+        save_frame = ttk.Frame(left_panel)
+        save_frame.pack(fill="x", pady=10)
+
+        ttk.Button(save_frame, text="💾 Einstellungen speichern", command=self.save_settings).pack(fill="x", pady=2)
+        ttk.Button(save_frame, text="📂 Einstellungen laden", command=self.load_settings).pack(fill="x", pady=2)
+        # --------------------------------
 
         ttk.Button(left_panel, text="Punkte Reset (Seitenverhältnis)", command=self.reset_points_aspect).pack(fill="x",
                                                                                                               pady=(20,
@@ -103,6 +112,59 @@ class ProjectionStudio:
     def browse_file(self):
         f = filedialog.askopenfilename(filetypes=[("Video", "*.mp4 *.mov *.avi *.mkv")])
         if f: self.file_path.set(f)
+
+    # --- SAVE / LOAD LOGIC ---
+    def save_settings(self):
+        filename = filedialog.asksaveasfilename(
+            defaultextension=".json",
+            filetypes=[("JSON Config", "*.json"), ("All Files", "*.*")]
+        )
+        if not filename: return
+
+        data = {
+            "norm_points": state.norm_points,
+            "source_mode": self.source_mode.get(),
+            "file_path": self.file_path.get(),
+            "fullscreen": self.use_fullscreen.get(),
+            "show_overlays": self.show_overlays.get()
+        }
+
+        try:
+            with open(filename, "w") as f:
+                json.dump(data, f, indent=4)
+            messagebox.showinfo("Gespeichert", f"Einstellungen gespeichert in:\n{os.path.basename(filename)}")
+        except Exception as e:
+            messagebox.showerror("Fehler", f"Speichern fehlgeschlagen:\n{e}")
+
+    def load_settings(self):
+        filename = filedialog.askopenfilename(
+            filetypes=[("JSON Config", "*.json"), ("All Files", "*.*")]
+        )
+        if not filename: return
+
+        try:
+            with open(filename, "r") as f:
+                data = json.load(f)
+
+            # Werte wiederherstellen
+            if "norm_points" in data:
+                state.norm_points = data["norm_points"]
+            if "source_mode" in data:
+                self.source_mode.set(data["source_mode"])
+            if "file_path" in data:
+                self.file_path.set(data["file_path"])
+            if "fullscreen" in data:
+                self.use_fullscreen.set(data["fullscreen"])
+            if "show_overlays" in data:
+                self.show_overlays.set(data["show_overlays"])
+
+            self.update_preview()
+            messagebox.showinfo("Geladen", "Einstellungen erfolgreich geladen!")
+
+        except Exception as e:
+            messagebox.showerror("Fehler", f"Laden fehlgeschlagen:\n{e}")
+
+    # -------------------------
 
     def toggle_projection(self):
         if not self.is_projecting:
@@ -178,7 +240,10 @@ class ProjectionStudio:
 
         self.src_points = np.float32([[0, 0], [self.vid_w, 0], [self.vid_w, self.vid_h], [0, self.vid_h]])
 
-        self.reset_points_aspect()
+        # WICHTIG: Beim Starten nicht resetten, falls geladene Punkte da sind!
+        # Nur resetten, wenn es noch die Standardwerte sind
+        if state.norm_points == [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]:
+            self.reset_points_aspect()
 
         self.is_projecting = True
         self.btn_start.config(text="STOP")
@@ -225,7 +290,8 @@ class ProjectionStudio:
         # Events
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
-                self.stop_projection(); return
+                self.stop_projection();
+                return
             elif event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_q: self.stop_projection(); return
 

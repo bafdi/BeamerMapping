@@ -31,7 +31,7 @@ class ProjectionStudio(ctk.CTk):
     def __init__(self):
         super().__init__()
 
-        self.title("Mapping Studio Pro V22 Clean")
+        self.title("Mapping Studio")
         self.geometry("1250x850")
 
         # Pygame Init

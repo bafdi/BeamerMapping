@@ -4,8 +4,7 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="cd8d36a0-b151-46a2-a5e0-3a98f7956d3b" name="Changes" comment="changed window name">
-      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+    <list default="true" id="cd8d36a0-b151-46a2-a5e0-3a98f7956d3b" name="Changes" comment="bugfixes">
       <change beforePath="$PROJECT_DIR$/mapping software.py" beforeDir="false" afterPath="$PROJECT_DIR$/mapping software.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
@@ -86,7 +85,7 @@
       <option name="presentableId" value="Default" />
       <updated>1769507192772</updated>
       <workItem from="1769507193788" duration="1890000" />
-      <workItem from="1769509390717" duration="16292000" />
+      <workItem from="1769509390717" duration="16763000" />
     </task>
     <task id="LOCAL-00001" summary="mapping software and config screen">
       <option name="closed" value="true" />
@@ -200,7 +199,15 @@
       <option name="project" value="LOCAL" />
       <updated>1769545947194</updated>
     </task>
-    <option name="localTasksCounter" value="15" />
+    <task id="LOCAL-00015" summary="bugfixes">
+      <option name="closed" value="true" />
+      <created>1769546583776</created>
+      <option name="number" value="00015" />
+      <option name="presentableId" value="LOCAL-00015" />
+      <option name="project" value="LOCAL" />
+      <updated>1769546583776</updated>
+    </task>
+    <option name="localTasksCounter" value="16" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -224,16 +231,16 @@
     <MESSAGE value="hide config points of projection&#10;-&gt; show mode" />
     <MESSAGE value="added preset save and load manager (temporary, ui looks like shit)" />
     <MESSAGE value="updated gui design, presets manager" />
-    <MESSAGE value="bugfixes" />
     <MESSAGE value="added scalable projection border" />
     <MESSAGE value="added scalable projection in window mapping mode" />
     <MESSAGE value="bugfixes for fullscreen mode" />
     <MESSAGE value="removed extra fullscreen mode due to crashes. window mode can manually be set to fullscreen" />
     <MESSAGE value="changed window name" />
-    <option name="LAST_COMMIT_MESSAGE" value="changed window name" />
+    <MESSAGE value="bugfixes" />
+    <option name="LAST_COMMIT_MESSAGE" value="bugfixes" />
   </component>
   <component name="com.intellij.coverage.CoverageDataManagerImpl">
     <SUITE FILE_PATH="coverage/BeamerMapper$test.coverage" NAME="test Coverage Results" MODIFIED="1769508265574" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
-    <SUITE FILE_PATH="coverage/BeamerMapper$mapping_software.coverage" NAME="mapping software Coverage Results" MODIFIED="1769546521821" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
+    <SUITE FILE_PATH="coverage/BeamerMapper$mapping_software.coverage" NAME="mapping software Coverage Results" MODIFIED="1769546852952" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
   </component>
 </project>

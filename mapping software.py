@@ -32,7 +32,7 @@ class ProjectionStudio(ctk.CTk):
     def __init__(self):
         super().__init__()
 
-        self.title("Mapping Studio Pro V12.1 (Stability Fix)")
+        self.title("Mapping Studio Pro V13 (Resize & Cross)")
         self.geometry("1250x850")
 
         # --- STABILITY FIX: Pygame einmalig starten ---
@@ -253,7 +253,6 @@ class ProjectionStudio(ctk.CTk):
 
     def toggle_projection(self):
         if not self.is_projecting:
-            # --- STABILITY FIX: Kurze Verzögerung ---
             self.after(50, self.start_projection)
         else:
             self.stop_projection()
@@ -273,7 +272,6 @@ class ProjectionStudio(ctk.CTk):
         else:
             t_w, t_h = 800, 600
 
-        # --- STABILITY FIX: Init bereits im __init__ gemacht ---
         self.clock = pygame.time.Clock()
 
         flags = pygame.DOUBLEBUF
@@ -290,10 +288,8 @@ class ProjectionStudio(ctk.CTk):
                 os.environ['SDL_VIDEO_WINDOW_POS'] = f"{self.monitors[out_idx]['left']},{self.monitors[out_idx]['top']}"
             self.screen = pygame.display.set_mode((t_w, t_h), flags)
 
-        # Tatsächliche Größe holen (OS Resizing Fix)
         self.w, self.h = self.screen.get_size()
         state.output_res = (self.w, self.h)
-        print(f"Projection started at: {self.w}x{self.h}")
 
         if mode == "Screen":
             in_sel = self.combo_screens.get()
@@ -326,11 +322,7 @@ class ProjectionStudio(ctk.CTk):
     def stop_projection(self):
         self.is_projecting = False
         if self.cap: self.cap.release()
-
-        # --- STABILITY FIX: Nur Display beenden, nicht alles ---
         pygame.display.quit()
-        # -----------------------------------------------------
-
         self.btn_start.configure(text="PROJEKTION STARTEN", fg_color="#00C853", hover_color="#009624")
         self.canvas.delete("all")
         self.update_preview()
@@ -404,6 +396,14 @@ class ProjectionStudio(ctk.CTk):
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 self.stop_projection(); return
+
+            # --- WINDOW RESIZE EVENT (V13 NEU) ---
+            elif event.type == pygame.VIDEORESIZE:
+                self.w, self.h = event.w, event.h
+                state.output_res = (self.w, self.h)
+                self.screen = pygame.display.set_mode((self.w, self.h), pygame.RESIZABLE)
+            # -------------------------------------
+
             elif event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_q: self.stop_projection(); return
                 if event.key == pygame.K_m: self.switch_grid.toggle()
@@ -452,7 +452,6 @@ class ProjectionStudio(ctk.CTk):
                 ret, frame = self.cap.read()
 
         if frame is not None:
-            # WICHTIG: Prüfen ob das Surface noch lebt (Stability)
             try:
                 dst = np.float32([[p[0] * self.w, p[1] * self.h] for p in state.norm_points])
                 M = cv2.getPerspectiveTransform(self.src_points, dst)
@@ -463,6 +462,13 @@ class ProjectionStudio(ctk.CTk):
 
                 if is_edit:
                     pts = [(int(p[0]), int(p[1])) for p in dst]
+
+                    # --- HILFSKREUZ (V13 NEU) ---
+                    # Dünne Diagonalen zeichnen
+                    pygame.draw.line(self.screen, (0, 200, 200), pts[0], pts[2], 1)
+                    pygame.draw.line(self.screen, (0, 200, 200), pts[1], pts[3], 1)
+                    # ----------------------------
+
                     for i in range(4):
                         col = (255, 255, 0) if state.selected_edge == i else (0, 255, 255)
                         pygame.draw.line(self.screen, col, pts[i], pts[(i + 1) % 4], 4)
@@ -472,7 +478,6 @@ class ProjectionStudio(ctk.CTk):
 
                 pygame.display.flip()
             except pygame.error:
-                # Fenster wurde wohl geschlossen
                 self.stop_projection()
                 return
 

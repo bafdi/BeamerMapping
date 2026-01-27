@@ -23,8 +23,8 @@ state = MappingState()
 class ProjectionStudio:
     def __init__(self):
         self.root = tk.Tk()
-        self.root.title("Mapping Studio V4 (High Quality)")
-        self.root.geometry("1100x600")
+        self.root.title("Mapping Studio V5 (Show Mode)")
+        self.root.geometry("1100x650")
 
         self.is_projecting = False
         self.cap = None
@@ -35,6 +35,10 @@ class ProjectionStudio:
             self.monitors = []
 
         self.current_mode = None
+
+        # State Variable für Sichtbarkeit der Hilfslinien
+        self.show_overlays = tk.BooleanVar(value=True)
+
         self.build_ui()
 
     def build_ui(self):
@@ -71,17 +75,23 @@ class ProjectionStudio:
             self.cb_output_mon.current(0)
         self.cb_output_mon.pack(fill="x", pady=5)
 
+        # --- VIEW OPTIONS ---
+        ttk.Label(left_panel, text="3. ANSICHT", font=("Arial", 10, "bold")).pack(anchor="w", pady=(15, 5))
+
         self.use_fullscreen = tk.BooleanVar(value=True)
         ttk.Checkbutton(left_panel, text="Vollbild (Menüleiste ausblenden)", variable=self.use_fullscreen).pack(
+            anchor="w")
+
+        # HIER IST DER NEUE SHOW MODE BUTTON
+        ttk.Checkbutton(left_panel, text="Editier-Modus (Gitter anzeigen)", variable=self.show_overlays).pack(
             anchor="w", pady=5)
 
-        # Button: Reset Aspect Ratio
         ttk.Button(left_panel, text="Punkte Reset (Seitenverhältnis)", command=self.reset_points_aspect).pack(fill="x",
                                                                                                               pady=(20,
                                                                                                                     5))
 
         self.btn_start = ttk.Button(left_panel, text="PROJEKTION STARTEN", command=self.toggle_projection)
-        self.btn_start.pack(fill="x", pady=5)
+        self.btn_start.pack(fill="x", pady=10)
 
         # --- CANVAS ---
         self.canvas = tk.Canvas(right_panel, bg="black", width=500, height=400, cursor="crosshair")
@@ -101,25 +111,16 @@ class ProjectionStudio:
             self.stop_projection()
 
     def reset_points_aspect(self):
-        """Setzt die Punkte zurück, behält aber das Seitenverhältnis des Videos bei"""
         if self.vid_w > 0 and self.vid_h > 0:
             aspect = self.vid_w / self.vid_h
-            # Ziel-Breite im normalisierten Raum (0.8 = 80% der Breite)
             w = 0.8
-            # Ziel-Höhe berechnen basierend auf Output Aspect Ratio
-            # (Verhindert Verzerrung auf dem Beamer)
             screen_aspect = self.w / self.h
             h = w * (screen_aspect / aspect)
-
-            # Zentrieren
             x0 = (1.0 - w) / 2
             y0 = (1.0 - h) / 2
 
             state.norm_points = [
-                [x0, y0],  # TL
-                [x0 + w, y0],  # TR
-                [x0 + w, y0 + h],  # BR
-                [x0, y0 + h]  # BL
+                [x0, y0], [x0 + w, y0], [x0 + w, y0 + h], [x0, y0 + h]
             ]
             self.update_preview()
 
@@ -140,7 +141,6 @@ class ProjectionStudio:
         self.w, self.h = target_w, target_h
         self.clock = pygame.time.Clock()
 
-        # Flags: Fullscreen und Hardware Acceleration
         flags = pygame.DOUBLEBUF
         if self.use_fullscreen.get():
             flags |= pygame.FULLSCREEN
@@ -150,10 +150,8 @@ class ProjectionStudio:
         # Fenster Erstellung
         if self.use_fullscreen.get():
             try:
-                # Versuch 1: pygame-ce direct display
                 self.screen = pygame.display.set_mode((self.w, self.h), flags, display=out_idx)
             except TypeError:
-                # Versuch 2: Fallback
                 os.environ['SDL_VIDEO_WINDOW_POS'] = f"{self.monitors[out_idx]['left']},{self.monitors[out_idx]['top']}"
                 self.screen = pygame.display.set_mode((self.w, self.h), flags)
         else:
@@ -180,12 +178,10 @@ class ProjectionStudio:
 
         self.src_points = np.float32([[0, 0], [self.vid_w, 0], [self.vid_w, self.vid_h], [0, self.vid_h]])
 
-        # Initialen Aspect Ratio Reset durchführen
         self.reset_points_aspect()
 
         self.is_projecting = True
         self.btn_start.config(text="STOP")
-        self.show_ui = True
         self.projection_loop()
 
     def stop_projection(self):
@@ -223,15 +219,22 @@ class ProjectionStudio:
     def projection_loop(self):
         if not self.is_projecting: return
 
+        # Check: Sind wir im Edit Mode?
+        is_edit_mode = self.show_overlays.get()
+
         # Events
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 self.stop_projection(); return
             elif event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_q: self.stop_projection(); return
-                if event.key == pygame.K_m: self.show_ui = not self.show_ui
 
-            elif event.type == pygame.MOUSEBUTTONDOWN and self.show_ui:
+                # Taste M toggled jetzt die Checkbox im GUI
+                if event.key == pygame.K_m:
+                    self.show_overlays.set(not is_edit_mode)
+
+            # Maus Interaktion NUR wenn Edit Mode aktiv ist
+            elif event.type == pygame.MOUSEBUTTONDOWN and is_edit_mode:
                 if event.button == 1:
                     mx, my = pygame.mouse.get_pos()
                     nmx, nmy = mx / self.w, my / self.h
@@ -239,12 +242,15 @@ class ProjectionStudio:
                     if min(dists) < 0.05: state.selected_point = np.argmin(dists)
 
             elif event.type == pygame.MOUSEMOTION and state.selected_point is not None:
-                if pygame.mouse.get_pressed()[0]:
+                if pygame.mouse.get_pressed()[0] and is_edit_mode:
                     mx, my = pygame.mouse.get_pos()
                     state.norm_points[state.selected_point] = [mx / self.w, my / self.h]
 
             elif event.type == pygame.MOUSEBUTTONUP:
                 state.selected_point = None
+
+        # Wenn Edit-Mode aus ist, Mauszeiger verstecken
+        pygame.mouse.set_visible(is_edit_mode)
 
         # Render
         frame = None
@@ -261,8 +267,6 @@ class ProjectionStudio:
             dst_pixels = np.float32([[p[0] * self.w, p[1] * self.h] for p in state.norm_points])
             M = cv2.getPerspectiveTransform(self.src_points, dst_pixels)
 
-            # --- HIGH QUALITY FIX ---
-            # Benutze LANCZOS4 statt Standard (LINEAR)
             warped = cv2.warpPerspective(frame, M, (self.w, self.h), flags=cv2.INTER_LANCZOS4)
 
             warped_rgb = cv2.cvtColor(warped, cv2.COLOR_BGR2RGB)
@@ -270,7 +274,8 @@ class ProjectionStudio:
             surf = pygame.surfarray.make_surface(warped_rgb)
             self.screen.blit(surf, (0, 0))
 
-            if self.show_ui:
+            # UI Overlay (Nur zeichnen, wenn Haken gesetzt)
+            if is_edit_mode:
                 pts = [(int(p[0]), int(p[1])) for p in dst_pixels]
                 pygame.draw.lines(self.screen, (0, 255, 255), True, pts, 3)
                 for i, p in enumerate(pts):
@@ -297,7 +302,6 @@ class ProjectionStudio:
 
         self.canvas.create_text(10, 10, anchor="nw", text="Output Preview", fill="white")
 
-    # --- HIER IST DIE FEHLENDE FUNKTION ---
     def run(self):
         self.root.mainloop()
 

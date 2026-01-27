@@ -6,18 +6,13 @@ import sys
 import mss
 import json
 import glob
+import time
 from datetime import datetime
 import tkinter as tk
 from tkinter import filedialog, messagebox
 import customtkinter as ctk
 
-# --- NOTCH KILLER FIX ---
-# Verbietet macOS, das Fenster in einen neuen "Space" zu schieben.
-# Das verhindert den Absturz und zwingt das Fenster ÜBER die Menüleiste.
-os.environ["SDL_VIDEO_MAC_FULLSCREEN_SPACES"] = "0"
-# ------------------------
-
-# Settings
+# --- SETTINGS ---
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("blue")
 
@@ -38,16 +33,17 @@ class ProjectionStudio(ctk.CTk):
     def __init__(self):
         super().__init__()
 
-        self.title("Mapping Studio Pro V17 (Notch Killer)")
+        self.title("Mapping Studio Pro V22 (Manual Fullscreen)")
         self.geometry("1250x850")
 
-        # Pygame Init
+        # Pygame Init (Einmalig beim Start)
         pygame.init()
 
         self.drag_start_pos = None
         self.is_projecting = False
         self.cap = None
         self.sct = mss.mss()
+
         try:
             self.monitors = self.sct.monitors[1:]
         except Exception:
@@ -109,13 +105,11 @@ class ProjectionStudio(ctk.CTk):
         if len(self.monitor_names) > 1: self.combo_output.set(self.monitor_names[1])
         self.combo_output.grid(row=5, column=0, padx=20, pady=(5, 10), sticky="ew")
 
-        self.switch_fullscreen = ctk.CTkSwitch(self.sidebar, text="Vollbild (Overlay)")
-        self.switch_fullscreen.select()
-        self.switch_fullscreen.grid(row=6, column=0, padx=20, pady=5, sticky="w")
+        # HINWEIS: Vollbild-Schalter entfernt, da manuell gesteuert
 
         self.switch_grid = ctk.CTkSwitch(self.sidebar, text="Edit Mode (Gitter/Kreuz)")
         self.switch_grid.select()
-        self.switch_grid.grid(row=7, column=0, padx=20, pady=5, sticky="w")
+        self.switch_grid.grid(row=7, column=0, padx=20, pady=20, sticky="w")
 
         # 3. PRESETS
         ctk.CTkLabel(self.sidebar, text="PRESETS", text_color="gray", font=("Arial", 11, "bold")).grid(row=8, column=0,
@@ -218,7 +212,6 @@ class ProjectionStudio(ctk.CTk):
             "file_path": path,
             "screen_idx": self.combo_screens.get(),
             "cam_idx": self.entry_cam.get(),
-            "fullscreen": self.switch_fullscreen.get(),
             "grid": self.switch_grid.get()
         }
 
@@ -246,8 +239,6 @@ class ProjectionStudio(ctk.CTk):
             if "cam_idx" in data:
                 self.entry_cam.delete(0, "end")
                 self.entry_cam.insert(0, data["cam_idx"])
-            if "fullscreen" in data:
-                self.switch_fullscreen.select() if data["fullscreen"] else self.switch_fullscreen.deselect()
 
             self.update_preview()
             print(f"Geladen: {filepath}")
@@ -278,24 +269,16 @@ class ProjectionStudio(ctk.CTk):
 
         self.clock = pygame.time.Clock()
 
-        # --- FULLSCREEN LOGIC ---
-        if self.switch_fullscreen.get():
-            # Dank os.environ["SDL_VIDEO_MAC_FULLSCREEN_SPACES"] = "0"
-            # verhält sich FULLSCREEN jetzt wie ein echtes Overlay ohne Spaces!
-            flags = pygame.FULLSCREEN
-        else:
-            flags = pygame.RESIZABLE
-
-        # Fenster erstellen
-        try:
-            self.screen = pygame.display.set_mode((t_w, t_h), flags, display=out_idx)
-        except TypeError:
-            self.screen = pygame.display.set_mode((t_w, t_h), flags)
+        # --- SIMPLE & STABLE START ---
+        # Wir starten IMMER als normales, skalierbares Fenster.
+        # Vollbild machst du dann manuell (Grüner Knopf).
+        self.screen = pygame.display.set_mode((t_w, t_h), pygame.RESIZABLE)
 
         self.w, self.h = self.screen.get_size()
         state.output_res = (self.w, self.h)
-        print(f"Projection active: {self.w}x{self.h} on Display {out_idx}")
+        print(f"Window started: {self.w}x{self.h} on Monitor {out_idx}")
 
+        # Source Setup
         if mode == "Screen":
             in_sel = self.combo_screens.get()
             in_idx = self.monitor_names.index(in_sel) if in_sel in self.monitor_names else 0
@@ -344,7 +327,6 @@ class ProjectionStudio(ctk.CTk):
     def get_hit_item(self, nx, ny):
         for i, p in enumerate(state.norm_points):
             if np.hypot((p[0] - nx), (p[1] - ny)) < 0.03: return "point", i
-
         num = len(state.norm_points)
         for i in range(num):
             p1, p2 = state.norm_points[i], state.norm_points[(i + 1) % num]
@@ -391,17 +373,18 @@ class ProjectionStudio(ctk.CTk):
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 self.stop_projection(); return
+
+            # RESIZE EVENT (Kein Crash mehr, da wir nur Maße lesen)
             elif event.type == pygame.VIDEORESIZE:
                 self.w, self.h = event.w, event.h
                 state.output_res = (self.w, self.h)
-                if not self.switch_fullscreen.get():
-                    self.screen = pygame.display.set_mode((self.w, self.h), pygame.RESIZABLE)
 
             elif event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_q: self.stop_projection(); return
                 if event.key == pygame.K_m: self.switch_grid.toggle()
 
             if is_edit:
+                # Maus Interaktion im Projektionsfenster
                 if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                     mx, my = pygame.mouse.get_pos()
                     nx, ny = mx / self.w, my / self.h
@@ -428,6 +411,8 @@ class ProjectionStudio(ctk.CTk):
                     state.selected_point, state.selected_edge, self.drag_start_pos = None, None, None
 
         pygame.mouse.set_visible(is_edit)
+
+        # Backup-Size-Check, falls Event verloren ging
         cur_w, cur_h = self.screen.get_size()
         if cur_w != self.w or cur_h != self.h: self.w, self.h = cur_w, cur_h
 
@@ -451,17 +436,17 @@ class ProjectionStudio(ctk.CTk):
 
                 if is_edit:
                     pts = [(int(p[0]), int(p[1])) for p in dst]
-                    # Hilfskreuz (Nur wenn Edit Mode an)
+                    # Hilfskreuz
                     pygame.draw.line(self.screen, (0, 150, 150), pts[0], pts[2], 1)
                     pygame.draw.line(self.screen, (0, 150, 150), pts[1], pts[3], 1)
-
+                    # Kanten
                     for i in range(4):
                         col = (255, 255, 0) if state.selected_edge == i else (0, 255, 255)
                         pygame.draw.line(self.screen, col, pts[i], pts[(i + 1) % 4], 4)
+                    # Punkte
                     for i, p in enumerate(pts):
                         col = (255, 0, 0) if i == state.selected_point else (0, 255, 0)
                         pygame.draw.circle(self.screen, col, p, 10)
-
                 pygame.display.flip()
             except Exception:
                 pass

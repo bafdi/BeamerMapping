@@ -9,13 +9,11 @@ import glob
 from datetime import datetime
 import tkinter as tk
 from tkinter import filedialog, messagebox
-
-# --- MODERNE UI LIBRARY ---
 import customtkinter as ctk
 
-# Settings für High-DPI Displays (Mac Retina Support)
-ctk.set_appearance_mode("Dark")  # Modes: "System" (standard), "Dark", "Light"
-ctk.set_default_color_theme("blue")  # Themes: "blue" (standard), "green", "dark-blue"
+# Settings
+ctk.set_appearance_mode("Dark")
+ctk.set_default_color_theme("blue")
 
 
 # --- STATE CLASS ---
@@ -57,21 +55,17 @@ class ProjectionStudio(ctk.CTk):
 
         self.build_sidebar()
         self.build_main_area()
-
-        # Initiale Preset Liste laden
         self.refresh_preset_list()
 
     def build_sidebar(self):
-        # --- SIDEBAR FRAME ---
         self.sidebar = ctk.CTkFrame(self, width=300, corner_radius=0)
         self.sidebar.grid(row=0, column=0, sticky="nsew")
-        self.sidebar.grid_rowconfigure(8, weight=1)  # Spacer vor Presets
+        self.sidebar.grid_rowconfigure(8, weight=1)
 
-        # HEADER
         logo = ctk.CTkLabel(self.sidebar, text="MAPPING STUDIO", font=ctk.CTkFont(size=20, weight="bold"))
         logo.grid(row=0, column=0, padx=20, pady=(20, 10), sticky="w")
 
-        # 1. INPUT SECTION
+        # 1. INPUT
         ctk.CTkLabel(self.sidebar, text="EINGANGSQUELLE", text_color="gray", font=("Arial", 11, "bold")).grid(row=1,
                                                                                                               column=0,
                                                                                                               padx=20,
@@ -79,28 +73,23 @@ class ProjectionStudio(ctk.CTk):
                                                                                                                     0),
                                                                                                               sticky="w")
 
-        # Tabs für Input Mode (File / Screen / Cam)
         self.input_tabs = ctk.CTkSegmentedButton(self.sidebar, values=["Datei", "Screen", "Webcam"],
                                                  command=self.update_input_ui)
         self.input_tabs.grid(row=2, column=0, padx=20, pady=10, sticky="ew")
         self.input_tabs.set("Datei")
 
-        # Container für dynamische Input-Elemente
         self.input_container = ctk.CTkFrame(self.sidebar, fg_color="transparent")
         self.input_container.grid(row=3, column=0, padx=20, sticky="ew")
 
-        # Initiale UI Elemente erstellen (werden in update_input_ui sichtbar gemacht)
         self.btn_file = ctk.CTkButton(self.input_container, text="Video wählen...", command=self.browse_file)
         self.lbl_file = ctk.CTkLabel(self.input_container, text="Keine Datei", font=("Arial", 10), text_color="gray")
-
         self.combo_screens = ctk.CTkComboBox(self.input_container, values=self.monitor_names)
-
         self.entry_cam = ctk.CTkEntry(self.input_container, placeholder_text="Cam Index (z.B. 0)")
         self.entry_cam.insert(0, "0")
 
-        self.update_input_ui("Datei")  # Initialer Aufruf
+        self.update_input_ui("Datei")
 
-        # 2. OUTPUT SECTION
+        # 2. OUTPUT
         ctk.CTkLabel(self.sidebar, text="OUTPUT ZIEL", text_color="gray", font=("Arial", 11, "bold")).grid(row=4,
                                                                                                            column=0,
                                                                                                            padx=20,
@@ -111,7 +100,6 @@ class ProjectionStudio(ctk.CTk):
         if len(self.monitor_names) > 1: self.combo_output.set(self.monitor_names[1])
         self.combo_output.grid(row=5, column=0, padx=20, pady=(5, 10), sticky="ew")
 
-        # Switches
         self.switch_fullscreen = ctk.CTkSwitch(self.sidebar, text="Vollbild Modus")
         self.switch_fullscreen.select()
         self.switch_fullscreen.grid(row=6, column=0, padx=20, pady=5, sticky="w")
@@ -120,17 +108,15 @@ class ProjectionStudio(ctk.CTk):
         self.switch_grid.select()
         self.switch_grid.grid(row=7, column=0, padx=20, pady=5, sticky="w")
 
-        # 3. PRESET LISTE (Scrollbar)
+        # 3. PRESETS
         ctk.CTkLabel(self.sidebar, text="PRESETS", text_color="gray", font=("Arial", 11, "bold")).grid(row=8, column=0,
                                                                                                        padx=20,
                                                                                                        pady=(20, 0),
                                                                                                        sticky="sw")
 
-        # Scrollable Frame statt Tabelle (Sieht viel moderner aus)
         self.preset_frame = ctk.CTkScrollableFrame(self.sidebar, height=200, label_text="Gespeicherte Setups")
         self.preset_frame.grid(row=9, column=0, padx=20, pady=(5, 10), sticky="nsew")
 
-        # Footer Buttons für Presets
         preset_actions = ctk.CTkFrame(self.sidebar, fg_color="transparent")
         preset_actions.grid(row=10, column=0, padx=20, pady=10, sticky="ew")
 
@@ -140,13 +126,11 @@ class ProjectionStudio(ctk.CTk):
                       command=self.refresh_preset_list).pack(side="right")
 
     def build_main_area(self):
-        # MAIN AREA
         self.main_frame = ctk.CTkFrame(self, corner_radius=0, fg_color="transparent")
         self.main_frame.grid(row=0, column=1, sticky="nsew", padx=20, pady=20)
         self.main_frame.grid_rowconfigure(1, weight=1)
         self.main_frame.grid_columnconfigure(0, weight=1)
 
-        # Header Buttons Main
         header = ctk.CTkFrame(self.main_frame, fg_color="transparent")
         header.grid(row=0, column=0, sticky="ew", pady=(0, 10))
 
@@ -157,15 +141,12 @@ class ProjectionStudio(ctk.CTk):
         ctk.CTkButton(header, text="Reset Form", height=40, fg_color="#455A64", hover_color="#37474F",
                       command=self.reset_points_aspect).pack(side="right")
 
-        # PREVIEW CANVAS
-        # Wir betten das klassische Canvas in einen CTK Frame ein
         canvas_container = ctk.CTkFrame(self.main_frame)
         canvas_container.grid(row=1, column=0, sticky="nsew")
 
         self.canvas = tk.Canvas(canvas_container, bg="black", highlightthickness=0, cursor="crosshair")
         self.canvas.pack(fill="both", expand=True, padx=2, pady=2)
 
-        # Canvas Events
         self.canvas.bind("<Button-1>", self.on_canvas_click)
         self.canvas.bind("<B1-Motion>", self.on_canvas_drag)
         self.canvas.bind("<ButtonRelease-1>", self.on_canvas_release)
@@ -173,7 +154,6 @@ class ProjectionStudio(ctk.CTk):
         self.canvas.create_text(20, 20, anchor="nw", text="LIVE VORSCHAU", fill="white", font=("Arial", 12, "bold"))
 
     def update_input_ui(self, mode):
-        # Alte Widgets entfernen (pack_forget)
         self.btn_file.pack_forget()
         self.lbl_file.pack_forget()
         self.combo_screens.pack_forget()
@@ -188,12 +168,10 @@ class ProjectionStudio(ctk.CTk):
             self.entry_cam.pack(fill="x")
 
     def refresh_preset_list(self):
-        # Liste leeren
         for widget in self.preset_frame.winfo_children():
             widget.destroy()
 
         files = glob.glob(os.path.join(self.preset_dir, "*.json"))
-        # Sortieren nach Datum (neu oben)
         files.sort(key=os.path.getmtime, reverse=True)
 
         for f in files:
@@ -201,16 +179,12 @@ class ProjectionStudio(ctk.CTk):
             ts = os.path.getmtime(f)
             date_str = datetime.fromtimestamp(ts).strftime('%d.%m.%y')
 
-            # Row Card erstellen
             card = ctk.CTkFrame(self.preset_frame, fg_color=("gray85", "gray25"))
             card.pack(fill="x", pady=2, padx=2)
 
-            # Label Name
             ctk.CTkLabel(card, text=name, font=("Arial", 12, "bold")).pack(side="left", padx=10, pady=5)
-            # Label Date
             ctk.CTkLabel(card, text=date_str, font=("Arial", 10), text_color="gray").pack(side="left", padx=5)
 
-            # Load Button (Pfeil)
             btn = ctk.CTkButton(card, text="▶", width=30, height=30, fg_color="transparent", border_width=1,
                                 command=lambda path=f: self.load_preset(path))
             btn.pack(side="right", padx=5, pady=5)
@@ -219,14 +193,13 @@ class ProjectionStudio(ctk.CTk):
         f = filedialog.askopenfilename(filetypes=[("Video", "*.mp4 *.mov *.avi")])
         if f:
             self.lbl_file.configure(text=os.path.basename(f))
-            self.lbl_file.filepath = f  # Speichern im Widget Property
+            self.lbl_file.filepath = f
 
     def save_new_preset(self):
         dialog = ctk.CTkInputDialog(text="Name für das Preset:", title="Speichern")
         name = dialog.get_input()
         if not name: return
 
-        # Daten sammeln
         mode = self.input_tabs.get()
         path = getattr(self.lbl_file, 'filepath', "")
 
@@ -252,11 +225,7 @@ class ProjectionStudio(ctk.CTk):
         try:
             with open(filepath, "r") as f:
                 data = json.load(f)
-
-            # UI Update
             state.norm_points = data.get("norm_points", state.norm_points)
-
-            # Input Controls setzen
             mode = data.get("mode", "Datei")
             self.input_tabs.set(mode)
             self.update_input_ui(mode)
@@ -264,22 +233,18 @@ class ProjectionStudio(ctk.CTk):
             if "file_path" in data and data["file_path"]:
                 self.lbl_file.configure(text=os.path.basename(data["file_path"]))
                 self.lbl_file.filepath = data["file_path"]
-
             if "screen_idx" in data: self.combo_screens.set(data["screen_idx"])
             if "cam_idx" in data:
                 self.entry_cam.delete(0, "end")
                 self.entry_cam.insert(0, data["cam_idx"])
-
             if "fullscreen" in data:
                 self.switch_fullscreen.select() if data["fullscreen"] else self.switch_fullscreen.deselect()
 
             self.update_preview()
             print(f"Geladen: {filepath}")
-
         except Exception as e:
             messagebox.showerror("Error", str(e))
 
-    # --- PROJECTION LOGIC ---
     def toggle_projection(self):
         if not self.is_projecting:
             self.start_projection()
@@ -287,14 +252,11 @@ class ProjectionStudio(ctk.CTk):
             self.stop_projection()
 
     def reset_points_aspect(self):
-        # Fallback Aspect Ratio
         state.norm_points = [[0.1, 0.1], [0.9, 0.1], [0.9, 0.9], [0.1, 0.9]]
         self.update_preview()
 
     def start_projection(self):
         mode = self.input_tabs.get()
-
-        # Output Index ermitteln
         out_sel = self.combo_output.get()
         out_idx = self.monitor_names.index(out_sel) if out_sel in self.monitor_names else 0
 
@@ -304,9 +266,7 @@ class ProjectionStudio(ctk.CTk):
         else:
             t_w, t_h = 800, 600
 
-        # Pygame Init
         pygame.init()
-        self.w, self.h = t_w, t_h
         self.clock = pygame.time.Clock()
 
         flags = pygame.DOUBLEBUF
@@ -315,23 +275,22 @@ class ProjectionStudio(ctk.CTk):
         else:
             flags |= pygame.RESIZABLE
 
-        # Fenster positionieren
         try:
-            self.screen = pygame.display.set_mode((self.w, self.h), flags, display=out_idx)
+            self.screen = pygame.display.set_mode((t_w, t_h), flags, display=out_idx)
         except TypeError:
             if self.monitors:
                 os.environ['SDL_VIDEO_WINDOW_POS'] = f"{self.monitors[out_idx]['left']},{self.monitors[out_idx]['top']}"
-            self.screen = pygame.display.set_mode((self.w, self.h), flags)
+            self.screen = pygame.display.set_mode((t_w, t_h), flags)
 
+        # WICHTIG: Tatsächliche Größe nach OS-Eingriff holen (behebt die Warnung)
+        self.w, self.h = self.screen.get_size()
         state.output_res = (self.w, self.h)
 
-        # Quelle öffnen
         if mode == "Screen":
             in_sel = self.combo_screens.get()
             in_idx = self.monitor_names.index(in_sel) if in_sel in self.monitor_names else 0
             self.input_rect = self.monitors[in_idx]
             self.vid_w, self.vid_h = self.input_rect["width"], self.input_rect["height"]
-
         elif mode == "Webcam":
             try:
                 cam_id = int(self.entry_cam.get())
@@ -341,8 +300,7 @@ class ProjectionStudio(ctk.CTk):
             if not self.cap.isOpened(): return
             self.vid_w = int(self.cap.get(3))
             self.vid_h = int(self.cap.get(4))
-
-        else:  # Datei
+        else:
             path = getattr(self.lbl_file, 'filepath', "")
             if not path: return messagebox.showerror("Fehler", "Keine Datei gewählt")
             self.cap = cv2.VideoCapture(path)
@@ -362,7 +320,7 @@ class ProjectionStudio(ctk.CTk):
         pygame.quit()
         self.btn_start.configure(text="PROJEKTION STARTEN", fg_color="#00C853", hover_color="#009624")
         self.canvas.delete("all")
-        self.update_preview()  # Canvas Text wiederherstellen
+        self.update_preview()
 
     def on_canvas_click(self, event):
         cw, ch = self.canvas.winfo_width(), self.canvas.winfo_height()
@@ -392,8 +350,7 @@ class ProjectionStudio(ctk.CTk):
                 self.stop_projection(); return
             elif event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_q: self.stop_projection(); return
-                if event.key == pygame.K_m:
-                    self.switch_grid.toggle()
+                if event.key == pygame.K_m: self.switch_grid.toggle()
 
             if is_edit:
                 if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
@@ -405,7 +362,7 @@ class ProjectionStudio(ctk.CTk):
                         pygame.mouse.get_pressed()[0]:
                     mx, my = pygame.mouse.get_pos()
                     state.norm_points[state.selected_point] = [mx / self.w, my / self.h]
-                elif event.type == pygame.MOUSEUP:
+                elif event.type == pygame.MOUSEBUTTONUP:  # --- HIER WAR DER FEHLER ---
                     state.selected_point = None
 
         pygame.mouse.set_visible(is_edit)

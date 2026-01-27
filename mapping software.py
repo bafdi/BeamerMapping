@@ -11,6 +11,12 @@ import tkinter as tk
 from tkinter import filedialog, messagebox
 import customtkinter as ctk
 
+# --- NOTCH KILLER FIX ---
+# Verbietet macOS, das Fenster in einen neuen "Space" zu schieben.
+# Das verhindert den Absturz und zwingt das Fenster ÜBER die Menüleiste.
+os.environ["SDL_VIDEO_MAC_FULLSCREEN_SPACES"] = "0"
+# ------------------------
+
 # Settings
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("blue")
@@ -32,16 +38,13 @@ class ProjectionStudio(ctk.CTk):
     def __init__(self):
         super().__init__()
 
-        self.title("Mapping Studio Pro V13 (Resize & Cross)")
+        self.title("Mapping Studio Pro V17 (Notch Killer)")
         self.geometry("1250x850")
 
-        # --- STABILITY FIX: Pygame einmalig starten ---
+        # Pygame Init
         pygame.init()
-        # ----------------------------------------------
 
-        # Dragging Helper Variablen
         self.drag_start_pos = None
-
         self.is_projecting = False
         self.cap = None
         self.sct = mss.mss()
@@ -106,11 +109,11 @@ class ProjectionStudio(ctk.CTk):
         if len(self.monitor_names) > 1: self.combo_output.set(self.monitor_names[1])
         self.combo_output.grid(row=5, column=0, padx=20, pady=(5, 10), sticky="ew")
 
-        self.switch_fullscreen = ctk.CTkSwitch(self.sidebar, text="Vollbild Modus")
+        self.switch_fullscreen = ctk.CTkSwitch(self.sidebar, text="Vollbild (Overlay)")
         self.switch_fullscreen.select()
         self.switch_fullscreen.grid(row=6, column=0, padx=20, pady=5, sticky="w")
 
-        self.switch_grid = ctk.CTkSwitch(self.sidebar, text="Gitter anzeigen")
+        self.switch_grid = ctk.CTkSwitch(self.sidebar, text="Edit Mode (Gitter/Kreuz)")
         self.switch_grid.select()
         self.switch_grid.grid(row=7, column=0, padx=20, pady=5, sticky="w")
 
@@ -267,29 +270,31 @@ class ProjectionStudio(ctk.CTk):
         out_idx = self.monitor_names.index(out_sel) if out_sel in self.monitor_names else 0
 
         if self.monitors:
-            t_w = self.monitors[out_idx]['width']
-            t_h = self.monitors[out_idx]['height']
+            monitor = self.monitors[out_idx]
+            t_w, t_h = monitor['width'], monitor['height']
+            os.environ['SDL_VIDEO_WINDOW_POS'] = f"{monitor['left']},{monitor['top']}"
         else:
             t_w, t_h = 800, 600
 
         self.clock = pygame.time.Clock()
 
-        flags = pygame.DOUBLEBUF
+        # --- FULLSCREEN LOGIC ---
         if self.switch_fullscreen.get():
-            flags |= pygame.FULLSCREEN
+            # Dank os.environ["SDL_VIDEO_MAC_FULLSCREEN_SPACES"] = "0"
+            # verhält sich FULLSCREEN jetzt wie ein echtes Overlay ohne Spaces!
+            flags = pygame.FULLSCREEN
         else:
-            flags |= pygame.RESIZABLE
+            flags = pygame.RESIZABLE
 
         # Fenster erstellen
         try:
             self.screen = pygame.display.set_mode((t_w, t_h), flags, display=out_idx)
         except TypeError:
-            if self.monitors:
-                os.environ['SDL_VIDEO_WINDOW_POS'] = f"{self.monitors[out_idx]['left']},{self.monitors[out_idx]['top']}"
             self.screen = pygame.display.set_mode((t_w, t_h), flags)
 
         self.w, self.h = self.screen.get_size()
         state.output_res = (self.w, self.h)
+        print(f"Projection active: {self.w}x{self.h} on Display {out_idx}")
 
         if mode == "Screen":
             in_sel = self.combo_screens.get()
@@ -327,7 +332,7 @@ class ProjectionStudio(ctk.CTk):
         self.canvas.delete("all")
         self.update_preview()
 
-    # --- GEOMETRY HELPERS ---
+    # --- HELPERS ---
     def point_line_distance(self, p, a, b):
         p, a, b = np.array(p), np.array(a), np.array(b)
         ab = b - a
@@ -346,49 +351,39 @@ class ProjectionStudio(ctk.CTk):
             if self.point_line_distance([nx, ny], p1, p2) < 0.03: return "edge", i
         return None, None
 
-    # --- CANVAS INTERACTION ---
+    # --- INTERACTION ---
     def on_canvas_click(self, event):
         cw, ch = self.canvas.winfo_width(), self.canvas.winfo_height()
         nx, ny = event.x / cw, event.y / ch
-
         item_type, idx = self.get_hit_item(nx, ny)
-
         if item_type == "point":
             state.selected_point, state.selected_edge = idx, None
         elif item_type == "edge":
-            state.selected_edge, state.selected_point = idx, None
-            self.drag_start_pos = (nx, ny)
+            state.selected_edge, state.selected_point = idx, None; self.drag_start_pos = (nx, ny)
         else:
             state.selected_point, state.selected_edge = None, None
-
         self.update_preview()
 
     def on_canvas_drag(self, event):
         cw, ch = self.canvas.winfo_width(), self.canvas.winfo_height()
         nx, ny = max(0, min(1, event.x / cw)), max(0, min(1, event.y / ch))
-
         if state.selected_point is not None:
             state.norm_points[state.selected_point] = [nx, ny]
             self.update_preview()
-
         elif state.selected_edge is not None and self.drag_start_pos:
             dx, dy = nx - self.drag_start_pos[0], ny - self.drag_start_pos[1]
             i1, i2 = state.selected_edge, (state.selected_edge + 1) % 4
             p1, p2 = state.norm_points[i1], state.norm_points[i2]
-
             state.norm_points[i1] = [max(0, min(1, p1[0] + dx)), max(0, min(1, p1[1] + dy))]
             state.norm_points[i2] = [max(0, min(1, p2[0] + dx)), max(0, min(1, p2[1] + dy))]
-
             self.drag_start_pos = (nx, ny)
             self.update_preview()
 
     def on_canvas_release(self, event):
-        state.selected_point = None
-        state.selected_edge = None
-        self.drag_start_pos = None
+        state.selected_point, state.selected_edge, self.drag_start_pos = None, None, None
         self.update_preview()
 
-    # --- PROJECTION LOOP ---
+    # --- LOOP ---
     def projection_loop(self):
         if not self.is_projecting: return
         is_edit = self.switch_grid.get()
@@ -396,13 +391,11 @@ class ProjectionStudio(ctk.CTk):
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 self.stop_projection(); return
-
-            # --- WINDOW RESIZE EVENT (V13 NEU) ---
             elif event.type == pygame.VIDEORESIZE:
                 self.w, self.h = event.w, event.h
                 state.output_res = (self.w, self.h)
-                self.screen = pygame.display.set_mode((self.w, self.h), pygame.RESIZABLE)
-            # -------------------------------------
+                if not self.switch_fullscreen.get():
+                    self.screen = pygame.display.set_mode((self.w, self.h), pygame.RESIZABLE)
 
             elif event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_q: self.stop_projection(); return
@@ -412,18 +405,15 @@ class ProjectionStudio(ctk.CTk):
                 if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                     mx, my = pygame.mouse.get_pos()
                     nx, ny = mx / self.w, my / self.h
-
                     item_type, idx = self.get_hit_item(nx, ny)
                     if item_type == "point":
                         state.selected_point, state.selected_edge = idx, None
                     elif item_type == "edge":
-                        state.selected_edge, state.selected_point = idx, None
-                        self.drag_start_pos = (nx, ny)
+                        state.selected_edge, state.selected_point = idx, None; self.drag_start_pos = (nx, ny)
 
                 elif event.type == pygame.MOUSEMOTION and pygame.mouse.get_pressed()[0]:
                     mx, my = pygame.mouse.get_pos()
                     nx, ny = max(0, min(1, mx / self.w)), max(0, min(1, my / self.h))
-
                     if state.selected_point is not None:
                         state.norm_points[state.selected_point] = [nx, ny]
                     elif state.selected_edge is not None and self.drag_start_pos:
@@ -435,11 +425,11 @@ class ProjectionStudio(ctk.CTk):
                         self.drag_start_pos = (nx, ny)
 
                 elif event.type == pygame.MOUSEBUTTONUP:
-                    state.selected_point = None
-                    state.selected_edge = None
-                    self.drag_start_pos = None
+                    state.selected_point, state.selected_edge, self.drag_start_pos = None, None, None
 
         pygame.mouse.set_visible(is_edit)
+        cur_w, cur_h = self.screen.get_size()
+        if cur_w != self.w or cur_h != self.h: self.w, self.h = cur_w, cur_h
 
         frame = None
         if self.input_tabs.get() == "Screen":
@@ -456,18 +446,14 @@ class ProjectionStudio(ctk.CTk):
                 dst = np.float32([[p[0] * self.w, p[1] * self.h] for p in state.norm_points])
                 M = cv2.getPerspectiveTransform(self.src_points, dst)
                 warped = cv2.warpPerspective(frame, M, (self.w, self.h), flags=cv2.INTER_LANCZOS4)
-
                 surf = pygame.surfarray.make_surface(cv2.transpose(cv2.cvtColor(warped, cv2.COLOR_BGR2RGB)))
                 self.screen.blit(surf, (0, 0))
 
                 if is_edit:
                     pts = [(int(p[0]), int(p[1])) for p in dst]
-
-                    # --- HILFSKREUZ (V13 NEU) ---
-                    # Dünne Diagonalen zeichnen
-                    pygame.draw.line(self.screen, (0, 200, 200), pts[0], pts[2], 1)
-                    pygame.draw.line(self.screen, (0, 200, 200), pts[1], pts[3], 1)
-                    # ----------------------------
+                    # Hilfskreuz (Nur wenn Edit Mode an)
+                    pygame.draw.line(self.screen, (0, 150, 150), pts[0], pts[2], 1)
+                    pygame.draw.line(self.screen, (0, 150, 150), pts[1], pts[3], 1)
 
                     for i in range(4):
                         col = (255, 255, 0) if state.selected_edge == i else (0, 255, 255)
@@ -477,9 +463,8 @@ class ProjectionStudio(ctk.CTk):
                         pygame.draw.circle(self.screen, col, p, 10)
 
                 pygame.display.flip()
-            except pygame.error:
-                self.stop_projection()
-                return
+            except Exception:
+                pass
 
         self.update_preview()
         self.after(16, self.projection_loop)
@@ -487,23 +472,21 @@ class ProjectionStudio(ctk.CTk):
     def update_preview(self):
         self.canvas.delete("all")
         cw, ch = self.canvas.winfo_width(), self.canvas.winfo_height()
-
         pts_px = [(nx * cw, ny * ch) for nx, ny in state.norm_points]
 
-        # Kanten
+        if self.switch_grid.get():
+            self.canvas.create_line(pts_px[0][0], pts_px[0][1], pts_px[2][0], pts_px[2][1], fill="#008080", dash=(2, 4))
+            self.canvas.create_line(pts_px[1][0], pts_px[1][1], pts_px[3][0], pts_px[3][1], fill="#008080", dash=(2, 4))
+
         for i in range(4):
             p1, p2 = pts_px[i], pts_px[(i + 1) % 4]
             fill = "#FFD600" if state.selected_edge == i else "#29B6F6"
             width = 4 if state.selected_edge == i else 2
             self.canvas.create_line(p1[0], p1[1], p2[0], p2[1], fill=fill, width=width)
 
-        # Punkte
         for i, (px, py) in enumerate(pts_px):
             col = "#00C853" if i == state.selected_point else "#29B6F6"
             self.canvas.create_oval(px - 6, py - 6, px + 6, py + 6, fill=col, outline="white")
-
-        if not self.is_projecting:
-            self.canvas.create_text(20, 20, anchor="nw", text="LIVE VORSCHAU", fill="white", font=("Arial", 12, "bold"))
 
 
 if __name__ == "__main__":

@@ -2,11 +2,9 @@ import os
 import cv2
 import numpy as np
 import pygame
-import sys
 import mss
 import json
 import glob
-import time
 from datetime import datetime
 import tkinter as tk
 from tkinter import filedialog, messagebox
@@ -33,16 +31,42 @@ class ProjectionStudio(ctk.CTk):
     def __init__(self):
         super().__init__()
 
-        self.title("Mapping Studio")
+        self.title("Mapping Studio Pro V22 Clean")
         self.geometry("1250x850")
 
-        # Pygame Init (Einmalig beim Start)
+        # Pygame Init
         pygame.init()
 
+        # Variablen initialisieren (gegen PyCharm Warnungen)
         self.drag_start_pos = None
         self.is_projecting = False
         self.cap = None
         self.sct = mss.mss()
+        self.monitors = []
+        self.monitor_names = []
+        self.screen = None
+        self.clock = None
+        self.w = 800
+        self.h = 600
+        self.vid_w = 0
+        self.vid_h = 0
+        self.input_rect = None
+        self.src_points = None
+
+        # UI Elemente (Initialisierung)
+        self.sidebar = None
+        self.input_tabs = None
+        self.input_container = None
+        self.btn_file = None
+        self.lbl_file = None
+        self.combo_screens = None
+        self.entry_cam = None
+        self.combo_output = None
+        self.switch_grid = None
+        self.preset_frame = None
+        self.main_frame = None
+        self.btn_start = None
+        self.canvas = None
 
         try:
             self.monitors = self.sct.monitors[1:]
@@ -50,10 +74,12 @@ class ProjectionStudio(ctk.CTk):
             self.monitors = []
 
         self.monitor_names = [f"Monitor {i + 1} ({m['width']}x{m['height']})" for i, m in enumerate(self.monitors)]
-        if not self.monitor_names: self.monitor_names = ["Kein Monitor gefunden"]
+        if not self.monitor_names:
+            self.monitor_names = ["Kein Monitor gefunden"]
 
         self.preset_dir = os.path.join(os.getcwd(), "presets")
-        if not os.path.exists(self.preset_dir): os.makedirs(self.preset_dir)
+        if not os.path.exists(self.preset_dir):
+            os.makedirs(self.preset_dir)
 
         self.grid_columnconfigure(1, weight=1)
         self.grid_rowconfigure(0, weight=1)
@@ -71,15 +97,9 @@ class ProjectionStudio(ctk.CTk):
         logo.grid(row=0, column=0, padx=20, pady=(20, 10), sticky="w")
 
         # 1. INPUT
-        ctk.CTkLabel(self.sidebar, text="EINGANGSQUELLE", text_color="gray", font=("Arial", 11, "bold")).grid(row=1,
-                                                                                                              column=0,
-                                                                                                              padx=20,
-                                                                                                              pady=(10,
-                                                                                                                    0),
-                                                                                                              sticky="w")
+        ctk.CTkLabel(self.sidebar, text="EINGANGSQUELLE", text_color="gray", font=("Arial", 11, "bold")).grid(row=1, column=0, padx=20, pady=(10, 0), sticky="w")
 
-        self.input_tabs = ctk.CTkSegmentedButton(self.sidebar, values=["Datei", "Screen", "Webcam"],
-                                                 command=self.update_input_ui)
+        self.input_tabs = ctk.CTkSegmentedButton(self.sidebar, values=["Datei", "Screen", "Webcam"], command=self.update_input_ui)
         self.input_tabs.grid(row=2, column=0, padx=20, pady=10, sticky="ew")
         self.input_tabs.set("Datei")
 
@@ -95,27 +115,20 @@ class ProjectionStudio(ctk.CTk):
         self.update_input_ui("Datei")
 
         # 2. OUTPUT
-        ctk.CTkLabel(self.sidebar, text="OUTPUT ZIEL", text_color="gray", font=("Arial", 11, "bold")).grid(row=4,
-                                                                                                           column=0,
-                                                                                                           padx=20,
-                                                                                                           pady=(20, 0),
-                                                                                                           sticky="w")
+        ctk.CTkLabel(self.sidebar, text="OUTPUT ZIEL", text_color="gray", font=("Arial", 11, "bold")).grid(row=4, column=0, padx=20, pady=(20, 0), sticky="w")
 
         self.combo_output = ctk.CTkComboBox(self.sidebar, values=self.monitor_names)
-        if len(self.monitor_names) > 1: self.combo_output.set(self.monitor_names[1])
+        if len(self.monitor_names) > 1:
+            self.combo_output.set(self.monitor_names[1])
         self.combo_output.grid(row=5, column=0, padx=20, pady=(5, 10), sticky="ew")
 
-        # HINWEIS: Vollbild-Schalter entfernt, da manuell gesteuert
-
+        # 3. OPTIONS
         self.switch_grid = ctk.CTkSwitch(self.sidebar, text="Edit Mode (Gitter/Kreuz)")
         self.switch_grid.select()
         self.switch_grid.grid(row=7, column=0, padx=20, pady=20, sticky="w")
 
-        # 3. PRESETS
-        ctk.CTkLabel(self.sidebar, text="PRESETS", text_color="gray", font=("Arial", 11, "bold")).grid(row=8, column=0,
-                                                                                                       padx=20,
-                                                                                                       pady=(20, 0),
-                                                                                                       sticky="sw")
+        # 4. PRESETS
+        ctk.CTkLabel(self.sidebar, text="PRESETS", text_color="gray", font=("Arial", 11, "bold")).grid(row=8, column=0, padx=20, pady=(20, 0), sticky="sw")
 
         self.preset_frame = ctk.CTkScrollableFrame(self.sidebar, height=200, label_text="Gespeicherte Setups")
         self.preset_frame.grid(row=9, column=0, padx=20, pady=(5, 10), sticky="nsew")
@@ -123,10 +136,8 @@ class ProjectionStudio(ctk.CTk):
         preset_actions = ctk.CTkFrame(self.sidebar, fg_color="transparent")
         preset_actions.grid(row=10, column=0, padx=20, pady=10, sticky="ew")
 
-        ctk.CTkButton(preset_actions, text="+ Neu", width=80, command=self.save_new_preset).pack(side="left",
-                                                                                                 padx=(0, 5))
-        ctk.CTkButton(preset_actions, text="↻ Refresh", width=80, fg_color="transparent", border_width=1,
-                      command=self.refresh_preset_list).pack(side="right")
+        ctk.CTkButton(preset_actions, text="+ Neu", width=80, command=self.save_new_preset).pack(side="left", padx=(0, 5))
+        ctk.CTkButton(preset_actions, text="↻ Refresh", width=80, fg_color="transparent", border_width=1, command=self.refresh_preset_list).pack(side="right")
 
     def build_main_area(self):
         self.main_frame = ctk.CTkFrame(self, corner_radius=0, fg_color="transparent")
@@ -204,6 +215,7 @@ class ProjectionStudio(ctk.CTk):
         if not name: return
 
         mode = self.input_tabs.get()
+        # Safe access to filepath attribute
         path = getattr(self.lbl_file, 'filepath', "")
 
         data = {
@@ -269,9 +281,7 @@ class ProjectionStudio(ctk.CTk):
 
         self.clock = pygame.time.Clock()
 
-        # --- SIMPLE & STABLE START ---
-        # Wir starten IMMER als normales, skalierbares Fenster.
-        # Vollbild machst du dann manuell (Grüner Knopf).
+        # Start als normales Fenster
         self.screen = pygame.display.set_mode((t_w, t_h), pygame.RESIZABLE)
 
         self.w, self.h = self.screen.get_size()
@@ -287,17 +297,23 @@ class ProjectionStudio(ctk.CTk):
         elif mode == "Webcam":
             try:
                 cam_id = int(self.entry_cam.get())
-            except:
+            except ValueError:
                 cam_id = 0
             self.cap = cv2.VideoCapture(cam_id)
-            if not self.cap.isOpened(): return
+            if not self.cap.isOpened():
+                messagebox.showerror("Fehler", "Webcam nicht gefunden")
+                return
             self.vid_w = int(self.cap.get(3))
             self.vid_h = int(self.cap.get(4))
         else:
             path = getattr(self.lbl_file, 'filepath', "")
-            if not path: return messagebox.showerror("Fehler", "Keine Datei gewählt")
+            if not path:
+                messagebox.showerror("Fehler", "Keine Datei gewählt")
+                return
             self.cap = cv2.VideoCapture(path)
-            if not self.cap.isOpened(): return
+            if not self.cap.isOpened():
+                messagebox.showerror("Fehler", "Konnte Video nicht öffnen")
+                return
             self.vid_w = int(self.cap.get(3))
             self.vid_h = int(self.cap.get(4))
 
@@ -316,7 +332,8 @@ class ProjectionStudio(ctk.CTk):
         self.update_preview()
 
     # --- HELPERS ---
-    def point_line_distance(self, p, a, b):
+    @staticmethod
+    def point_line_distance(p, a, b):
         p, a, b = np.array(p), np.array(a), np.array(b)
         ab = b - a
         ap = p - a
@@ -325,12 +342,16 @@ class ProjectionStudio(ctk.CTk):
         return np.linalg.norm(p - (a + t * ab))
 
     def get_hit_item(self, nx, ny):
+        # 1. Punkte
         for i, p in enumerate(state.norm_points):
-            if np.hypot((p[0] - nx), (p[1] - ny)) < 0.03: return "point", i
+            if np.hypot((p[0] - nx), (p[1] - ny)) < 0.03:
+                return "point", i
+        # 2. Kanten
         num = len(state.norm_points)
         for i in range(num):
             p1, p2 = state.norm_points[i], state.norm_points[(i + 1) % num]
-            if self.point_line_distance([nx, ny], p1, p2) < 0.03: return "edge", i
+            if self.point_line_distance([nx, ny], p1, p2) < 0.03:
+                return "edge", i
         return None, None
 
     # --- INTERACTION ---
@@ -355,9 +376,10 @@ class ProjectionStudio(ctk.CTk):
         elif state.selected_edge is not None and self.drag_start_pos:
             dx, dy = nx - self.drag_start_pos[0], ny - self.drag_start_pos[1]
             i1, i2 = state.selected_edge, (state.selected_edge + 1) % 4
-            p1, p2 = state.norm_points[i1], state.norm_points[i2]
-            state.norm_points[i1] = [max(0, min(1, p1[0] + dx)), max(0, min(1, p1[1] + dy))]
-            state.norm_points[i2] = [max(0, min(1, p2[0] + dx)), max(0, min(1, p2[1] + dy))]
+            state.norm_points[i1] = [max(0, min(1, state.norm_points[i1][0] + dx)),
+                                     max(0, min(1, state.norm_points[i1][1] + dy))]
+            state.norm_points[i2] = [max(0, min(1, state.norm_points[i2][0] + dx)),
+                                     max(0, min(1, state.norm_points[i2][1] + dy))]
             self.drag_start_pos = (nx, ny)
             self.update_preview()
 
@@ -374,7 +396,6 @@ class ProjectionStudio(ctk.CTk):
             if event.type == pygame.QUIT:
                 self.stop_projection(); return
 
-            # RESIZE EVENT (Kein Crash mehr, da wir nur Maße lesen)
             elif event.type == pygame.VIDEORESIZE:
                 self.w, self.h = event.w, event.h
                 state.output_res = (self.w, self.h)
@@ -384,7 +405,6 @@ class ProjectionStudio(ctk.CTk):
                 if event.key == pygame.K_m: self.switch_grid.toggle()
 
             if is_edit:
-                # Maus Interaktion im Projektionsfenster
                 if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                     mx, my = pygame.mouse.get_pos()
                     nx, ny = mx / self.w, my / self.h
@@ -402,9 +422,10 @@ class ProjectionStudio(ctk.CTk):
                     elif state.selected_edge is not None and self.drag_start_pos:
                         dx, dy = nx - self.drag_start_pos[0], ny - self.drag_start_pos[1]
                         i1, i2 = state.selected_edge, (state.selected_edge + 1) % 4
-                        p1, p2 = state.norm_points[i1], state.norm_points[i2]
-                        state.norm_points[i1] = [max(0, min(1, p1[0] + dx)), max(0, min(1, p1[1] + dy))]
-                        state.norm_points[i2] = [max(0, min(1, p2[0] + dx)), max(0, min(1, p2[1] + dy))]
+                        state.norm_points[i1] = [max(0, min(1, state.norm_points[i1][0] + dx)),
+                                                 max(0, min(1, state.norm_points[i1][1] + dy))]
+                        state.norm_points[i2] = [max(0, min(1, state.norm_points[i2][0] + dx)),
+                                                 max(0, min(1, state.norm_points[i2][1] + dy))]
                         self.drag_start_pos = (nx, ny)
 
                 elif event.type == pygame.MOUSEBUTTONUP:
@@ -412,9 +433,14 @@ class ProjectionStudio(ctk.CTk):
 
         pygame.mouse.set_visible(is_edit)
 
-        # Backup-Size-Check, falls Event verloren ging
-        cur_w, cur_h = self.screen.get_size()
-        if cur_w != self.w or cur_h != self.h: self.w, self.h = cur_w, cur_h
+        # Sicherstellen, dass Maße stimmen
+        try:
+            cur_w, cur_h = self.screen.get_size()
+            if cur_w != self.w or cur_h != self.h: self.w, self.h = cur_w, cur_h
+        except pygame.error:
+            # Falls Fenster geschlossen wurde
+            self.stop_projection()
+            return
 
         frame = None
         if self.input_tabs.get() == "Screen":
@@ -436,14 +462,11 @@ class ProjectionStudio(ctk.CTk):
 
                 if is_edit:
                     pts = [(int(p[0]), int(p[1])) for p in dst]
-                    # Hilfskreuz
                     pygame.draw.line(self.screen, (0, 150, 150), pts[0], pts[2], 1)
                     pygame.draw.line(self.screen, (0, 150, 150), pts[1], pts[3], 1)
-                    # Kanten
                     for i in range(4):
                         col = (255, 255, 0) if state.selected_edge == i else (0, 255, 255)
                         pygame.draw.line(self.screen, col, pts[i], pts[(i + 1) % 4], 4)
-                    # Punkte
                     for i, p in enumerate(pts):
                         col = (255, 0, 0) if i == state.selected_point else (0, 255, 0)
                         pygame.draw.circle(self.screen, col, p, 10)

@@ -11,7 +11,7 @@ from PyQt6.QtGui import (
     QMouseEvent, QPaintEvent, QKeyEvent, QWheelEvent, QPolygon,
     QCursor
 )
-from PyQt6.QtWidgets import QWidget, QSizePolicy
+from PyQt6.QtWidgets import QWidget, QSizePolicy, QPushButton
 
 from .models import Polygon, MediaLayer, Project
 from .transform import numpy_to_qimage, warp_image, composite_polygons_fast
@@ -94,13 +94,36 @@ class PolygonCanvas(QWidget):
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
+        # Fit-Button (unten rechts im Canvas)
+        self._fit_btn = QPushButton("\u2922", self)  # ⤢ icon
+        self._fit_btn.setFixedSize(24, 24)
+        self._fit_btn.setToolTip("Zoom/Pan zuruecksetzen")
+        self._fit_btn.clicked.connect(self.reset_view)
+        self._fit_btn.setStyleSheet("""
+            QPushButton {
+                background: rgba(80, 80, 80, 180);
+                color: white;
+                border: 1px solid rgba(150, 150, 150, 120);
+                border-radius: 4px;
+                font-size: 14px;
+            }
+            QPushButton:hover { background: rgba(120, 120, 120, 220); }
+        """)
+
         # Performance: Reusable render buffer
         self._render_buffer: Optional[np.ndarray] = None
         self._last_render_size: tuple = (0, 0)
 
-    def set_snapping(self, enabled: bool) -> None:
-        """Aktiviere/Deaktiviere Snapping."""
+    def reset_view(self) -> None:
+        """Setze Zoom und Pan zurueck."""
+        self.zoom_level = 1.0
+        self.pan_offset = [0.0, 0.0]
+        self.update()
+
+    def set_snapping(self, enabled: bool, distance: float = 0.02) -> None:
+        """Aktiviere/Deaktiviere Snapping mit optionaler Distanz."""
         self.snapping_enabled = enabled
+        self.snap_distance = distance
 
     def set_current_polygon(self, polygon: Optional[Polygon]) -> None:
         """Setze das aktuell ausgewaehlte Polygon (wird hervorgehoben)."""
@@ -372,36 +395,117 @@ class PolygonCanvas(QWidget):
             result.append([new_x, new_y])
         return result
 
-    def _get_all_snap_points(self) -> List[Tuple[float, float]]:
-        """Hole alle Punkte aller Polygone fuer Snapping (ausser aktueller Punkt)."""
-        snap_points = []
+    def _get_other_snap_data(self) -> Tuple[List[Tuple[float, float]], List[Tuple[Tuple[float, float], Tuple[float, float]]]]:
+        """Hole Ecken und Kanten aller anderen Polygone fuer Snapping.
+
+        Returns:
+            (corners, edges) wobei edges eine Liste von (p1, p2) Tupeln ist.
+        """
+        corners = []
+        edges = []
 
         for poly in self.all_polygons:
+            if poly == self.current_polygon:
+                continue
             points = poly.source_points if self.mode == "source" else poly.output_points
             for i, (px, py) in enumerate(points):
-                # Aktuellen Punkt ausschliessen
-                if poly == self.current_polygon and i == self.selected_point:
-                    continue
-                snap_points.append((px, py))
+                corners.append((px, py))
+                # Kante von diesem Punkt zum naechsten
+                nx_p, ny_p = points[(i + 1) % len(points)]
+                edges.append(((px, py), (nx_p, ny_p)))
 
-        return snap_points
+        return corners, edges
+
+    @staticmethod
+    def _point_to_edge_snap(px: float, py: float,
+                            e1: Tuple[float, float], e2: Tuple[float, float]) -> Tuple[float, float, float]:
+        """Berechne naechsten Punkt auf einer Kante und Distanz.
+
+        Returns: (snap_x, snap_y, distance)
+        """
+        ax, ay = e1
+        bx, by = e2
+        abx, aby = bx - ax, by - ay
+        ab_len_sq = abx * abx + aby * aby
+        if ab_len_sq < 1e-12:
+            return ax, ay, ((px - ax) ** 2 + (py - ay) ** 2) ** 0.5
+
+        t = max(0.0, min(1.0, ((px - ax) * abx + (py - ay) * aby) / ab_len_sq))
+        snap_x = ax + t * abx
+        snap_y = ay + t * aby
+        dist = ((px - snap_x) ** 2 + (py - snap_y) ** 2) ** 0.5
+        return snap_x, snap_y, dist
 
     def _apply_snapping(self, nx: float, ny: float) -> Tuple[float, float]:
-        """Wende Snapping an falls aktiviert."""
+        """Wende Punkt-Snapping an (Ecke-zu-Ecke, dann Ecke-zu-Kante)."""
         if not self.snapping_enabled:
             return nx, ny
 
-        snap_points = self._get_all_snap_points()
-        min_dist = float('inf')
+        corners, edges = self._get_other_snap_data()
+        best_dist = float('inf')
         snapped_x, snapped_y = nx, ny
+        is_corner_snap = False
 
-        for sx, sy in snap_points:
+        # Ecke-zu-Ecke (Prioritaet)
+        for sx, sy in corners:
             dist = ((nx - sx) ** 2 + (ny - sy) ** 2) ** 0.5
-            if dist < min_dist and dist < self.snap_distance:
-                min_dist = dist
+            if dist < self.snap_distance and dist < best_dist:
+                best_dist = dist
                 snapped_x, snapped_y = sx, sy
+                is_corner_snap = True
+
+        # Ecke-zu-Kante (Fallback)
+        if not is_corner_snap:
+            for e1, e2 in edges:
+                sx, sy, dist = self._point_to_edge_snap(nx, ny, e1, e2)
+                if dist < self.snap_distance and dist < best_dist:
+                    best_dist = dist
+                    snapped_x, snapped_y = sx, sy
 
         return snapped_x, snapped_y
+
+    def _apply_shape_snapping(self, new_points: List[List[float]]) -> List[List[float]]:
+        """Wende Snapping fuer ein ganzes Polygon an.
+
+        Prueft alle Ecken des verschobenen Polygons gegen Ecken und Kanten
+        anderer Polygone. Ecke-zu-Ecke hat Prioritaet vor Ecke-zu-Kante.
+        """
+        if not self.snapping_enabled:
+            return new_points
+
+        corners, edges = self._get_other_snap_data()
+        if not corners and not edges:
+            return new_points
+
+        best_dx, best_dy = 0.0, 0.0
+        best_dist = float('inf')
+        best_is_corner = False
+
+        for px, py in new_points:
+            # Ecke-zu-Ecke
+            for sx, sy in corners:
+                dist = ((px - sx) ** 2 + (py - sy) ** 2) ** 0.5
+                if dist < self.snap_distance:
+                    # Ecke-zu-Ecke hat Prioritaet
+                    if not best_is_corner or dist < best_dist:
+                        best_dist = dist
+                        best_dx = sx - px
+                        best_dy = sy - py
+                        best_is_corner = True
+
+            # Ecke-zu-Kante (nur wenn kein Ecke-zu-Ecke gefunden)
+            if not best_is_corner:
+                for e1, e2 in edges:
+                    snap_x, snap_y, dist = self._point_to_edge_snap(px, py, e1, e2)
+                    if dist < self.snap_distance and dist < best_dist:
+                        best_dist = dist
+                        best_dx = snap_x - px
+                        best_dy = snap_y - py
+
+        if best_dist < self.snap_distance:
+            return [[p[0] + best_dx, p[1] + best_dy] for p in new_points]
+
+        return new_points
 
     def paintEvent(self, event: QPaintEvent) -> None:
         painter = QPainter(self)
@@ -832,6 +936,9 @@ class PolygonCanvas(QWidget):
                     new_y = max(0.0, min(1.0, py + dy))
                     new_points.append([new_x, new_y])
 
+                # Shape-Snapping anwenden
+                new_points = self._apply_shape_snapping(new_points)
+
                 if self.mode == "source":
                     self.current_polygon.source_points = new_points
                 else:
@@ -934,37 +1041,60 @@ class PolygonCanvas(QWidget):
             self.update()
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
-        """Tastatureingaben: Pfeiltasten fuer Punkt-Verschiebung."""
-        if self.selected_point is None or not self.current_polygon:
+        """Pfeiltasten: Punkt oder ganzes Polygon verschieben. Shift = fein."""
+        if not self.current_polygon:
             return
 
-        # Schrittgroesse
+        key = event.key()
+        if key not in (Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Up, Qt.Key.Key_Down):
+            return
+
+        # Shift = fein, normal = grob
         if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
-            step = 0.02  # Groesserer Schritt mit Shift
+            step = 0.001
         else:
-            step = 0.005  # Kleiner Schritt
+            step = 0.005
+
+        dx, dy = 0.0, 0.0
+        if key == Qt.Key.Key_Left:
+            dx = -step
+        elif key == Qt.Key.Key_Right:
+            dx = step
+        elif key == Qt.Key.Key_Up:
+            dy = -step
+        elif key == Qt.Key.Key_Down:
+            dy = step
 
         points = self.get_points()
-        if not points or self.selected_point >= len(points):
+        if not points:
             return
 
-        px, py = points[self.selected_point]
-        moved = False
+        if self.selected_point is not None and self.selected_point < len(points):
+            # Einzelnen Punkt verschieben
+            px, py = points[self.selected_point]
+            points[self.selected_point] = [
+                max(0.0, min(1.0, px + dx)),
+                max(0.0, min(1.0, py + dy))
+            ]
+        else:
+            # Ganzes Polygon verschieben
+            new_points = [
+                [max(0.0, min(1.0, p[0] + dx)), max(0.0, min(1.0, p[1] + dy))]
+                for p in points
+            ]
+            if self.mode == "source":
+                self.current_polygon.source_points = new_points
+            else:
+                self.current_polygon.output_points = new_points
 
-        if event.key() == Qt.Key.Key_Left:
-            px = max(0.0, px - step)
-            moved = True
-        elif event.key() == Qt.Key.Key_Right:
-            px = min(1.0, px + step)
-            moved = True
-        elif event.key() == Qt.Key.Key_Up:
-            py = max(0.0, py - step)
-            moved = True
-        elif event.key() == Qt.Key.Key_Down:
-            py = min(1.0, py + step)
-            moved = True
+        self.update()
+        self.points_changed.emit()
 
-        if moved:
-            points[self.selected_point] = [px, py]
-            self.update()
-            self.points_changed.emit()
+    def resizeEvent(self, event) -> None:
+        """Positioniere Fit-Button unten rechts."""
+        super().resizeEvent(event)
+        margin = 6
+        self._fit_btn.move(
+            self.width() - self._fit_btn.width() - margin,
+            self.height() - self._fit_btn.height() - margin
+        )

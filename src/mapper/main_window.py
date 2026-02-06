@@ -559,16 +559,13 @@ class MainWindow(QMainWindow):
         toolbar.addWidget(self.view_output_btn)
         toolbar.addWidget(self.view_both_btn)
 
-        # Snapping Toggle
+        # Snapping 3-Modi: Ein / Leicht / Aus
+        self._snap_mode = 0  # 0=Ein, 1=Leicht, 2=Aus
         self.snap_btn = QPushButton("Snap")
-        self.snap_btn.setCheckable(True)
-        self.snap_btn.setChecked(True)
         self.snap_btn.setFixedHeight(24)
         self.snap_btn.setFixedWidth(50)
-        self.snap_btn.clicked.connect(self._toggle_snapping)
-        self.snap_btn.setStyleSheet("""
-            QPushButton:checked { background-color: #2a6e2a; }
-        """)
+        self.snap_btn.clicked.connect(self._cycle_snapping)
+        self._update_snap_button()
         toolbar.addWidget(self.snap_btn)
 
         toolbar.addStretch()
@@ -620,13 +617,38 @@ class MainWindow(QMainWindow):
 
         return panel
 
-    def _toggle_snapping(self) -> None:
-        """Toggle Snapping on/off."""
-        self._snapping_enabled = self.snap_btn.isChecked()
-        self.source_canvas.set_snapping(self._snapping_enabled)
-        self.output_canvas.set_snapping(self._snapping_enabled)
-        status = "aktiviert" if self._snapping_enabled else "deaktiviert"
-        self.statusbar.showMessage(f"Snapping {status}")
+    def _cycle_snapping(self) -> None:
+        """Cycle Snapping: Ein -> Leicht -> Aus -> Ein."""
+        self._snap_mode = (self._snap_mode + 1) % 3
+        self._apply_snap_mode()
+
+    def _apply_snap_mode(self) -> None:
+        """Wende aktuellen Snap-Modus auf Canvas an."""
+        if self._snap_mode == 0:  # Ein
+            self.source_canvas.set_snapping(True, 0.02)
+            self.output_canvas.set_snapping(True, 0.02)
+            self.statusbar.showMessage("Snapping: Ein")
+        elif self._snap_mode == 1:  # Leicht
+            self.source_canvas.set_snapping(True, 0.008)
+            self.output_canvas.set_snapping(True, 0.008)
+            self.statusbar.showMessage("Snapping: Leicht")
+        else:  # Aus
+            self.source_canvas.set_snapping(False)
+            self.output_canvas.set_snapping(False)
+            self.statusbar.showMessage("Snapping: Aus")
+        self._update_snap_button()
+
+    def _update_snap_button(self) -> None:
+        """Update Snap-Button Aussehen."""
+        if self._snap_mode == 0:  # Ein
+            self.snap_btn.setStyleSheet("background-color: #2a6e2a;")
+            self.snap_btn.setText("Snap")
+        elif self._snap_mode == 1:  # Leicht
+            self.snap_btn.setStyleSheet("background-color: #b87a1a;")
+            self.snap_btn.setText("Snap~")
+        else:  # Aus
+            self.snap_btn.setStyleSheet("")
+            self.snap_btn.setText("Snap")
 
     def _on_canvas_polygon_selected(self, polygon: Polygon) -> None:
         """Handle Polygon-Auswahl aus dem Canvas."""

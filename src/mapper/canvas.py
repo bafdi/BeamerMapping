@@ -11,7 +11,7 @@ from PyQt6.QtGui import (
     QMouseEvent, QPaintEvent, QKeyEvent, QWheelEvent, QPolygon,
     QCursor
 )
-from PyQt6.QtWidgets import QWidget, QSizePolicy
+from PyQt6.QtWidgets import QWidget, QSizePolicy, QPushButton
 
 from .models import Polygon, MediaLayer, Project
 from .transform import numpy_to_qimage, warp_image, composite_polygons_fast
@@ -25,8 +25,9 @@ class HandleType(Enum):
     ROTATE = auto()     # Rotation
     CENTER = auto()     # Ganzes Polygon verschieben
 
+
 class PolygonCanvas(QWidget):
-    """Canvas zum Bearbeiten von Polygon-Punkten mit Magnetic Vertices."""
+    """Canvas zum Bearbeiten von Polygon-Punkten."""
 
     points_changed = pyqtSignal()
     polygon_selected = pyqtSignal(object)  # (polygon)
@@ -76,11 +77,9 @@ class PolygonCanvas(QWidget):
         self.drag_start_angle: float = 0.0
         self.maintain_aspect_ratio = False  # Shift gedrueckt
 
-        # Magnetic / Snapping System
+        # Snapping
         self.snapping_enabled = True
-        self.snap_distance = 0.02  # Normalisierte Distanz fuer Grid-Snapping
-        self.connected_points_indices: List[Tuple[Polygon, int, List[float]]] = []  # (Poly, Index, StartPos)
-        self.detach_magnetic = False  # Alt-Taste zum Loesen
+        self.snap_distance = 0.02  # Normalisierte Distanz fuer Snapping
 
         # Zoom und Pan
         self.zoom_level = 1.0
@@ -95,13 +94,36 @@ class PolygonCanvas(QWidget):
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
+        # Fit-Button (unten rechts im Canvas)
+        self._fit_btn = QPushButton("\u2922", self)  # ⤢ icon
+        self._fit_btn.setFixedSize(24, 24)
+        self._fit_btn.setToolTip("Zoom/Pan zuruecksetzen")
+        self._fit_btn.clicked.connect(self.reset_view)
+        self._fit_btn.setStyleSheet("""
+            QPushButton {
+                background: rgba(80, 80, 80, 180);
+                color: white;
+                border: 1px solid rgba(150, 150, 150, 120);
+                border-radius: 4px;
+                font-size: 14px;
+            }
+            QPushButton:hover { background: rgba(120, 120, 120, 220); }
+        """)
+
         # Performance: Reusable render buffer
         self._render_buffer: Optional[np.ndarray] = None
         self._last_render_size: tuple = (0, 0)
 
-    def set_snapping(self, enabled: bool) -> None:
-        """Aktiviere/Deaktiviere Snapping."""
+    def reset_view(self) -> None:
+        """Setze Zoom und Pan zurueck."""
+        self.zoom_level = 1.0
+        self.pan_offset = [0.0, 0.0]
+        self.update()
+
+    def set_snapping(self, enabled: bool, distance: float = 0.02) -> None:
+        """Aktiviere/Deaktiviere Snapping mit optionaler Distanz."""
         self.snapping_enabled = enabled
+        self.snap_distance = distance
 
     def set_current_polygon(self, polygon: Optional[Polygon]) -> None:
         """Setze das aktuell ausgewaehlte Polygon (wird hervorgehoben)."""
@@ -134,9 +156,11 @@ class PolygonCanvas(QWidget):
 
     # Legacy methods for compatibility
     def set_layer(self, layer: Optional[MediaLayer]) -> None:
+        """Legacy: Wird nicht mehr verwendet."""
         pass
 
     def set_all_layers(self, layers: List[MediaLayer]) -> None:
+        """Legacy: Wird nicht mehr verwendet."""
         pass
 
     def set_all_images(self, images: Dict[str, np.ndarray]) -> None:
@@ -159,11 +183,12 @@ class PolygonCanvas(QWidget):
         """Hole Aspect Ratio - Output immer 16:9, Source vom Bild."""
         if self.mode == "output":
             return self.OUTPUT_ASPECT_RATIO
+        # Source: Aspect Ratio vom Bild
         if self.image is not None:
             h, w = self.image.shape[:2]
             if h > 0:
                 return w / h
-        return 16 / 9
+        return 16 / 9  # Default
 
     def get_points(self) -> List[List[float]]:
         """Hole die aktuellen Punkte basierend auf dem Modus."""
@@ -177,6 +202,7 @@ class PolygonCanvas(QWidget):
         h = self.height()
         aspect = self._get_aspect_ratio()
 
+        # Berechne Groesse mit Aspect Ratio
         canvas_w = w
         canvas_h = int(w / aspect)
 
@@ -184,6 +210,7 @@ class PolygonCanvas(QWidget):
             canvas_h = h
             canvas_w = int(h * aspect)
 
+        # Zentrieren
         x = (w - canvas_w) // 2
         y = (h - canvas_h) // 2
 
@@ -192,8 +219,11 @@ class PolygonCanvas(QWidget):
     def _norm_to_pixel(self, nx: float, ny: float) -> Tuple[int, int]:
         """Konvertiere normalisierte Koordinaten zu Pixel (mit Zoom/Pan)."""
         x, y, w, h = self._calc_canvas_rect()
+
+        # Zoom und Pan anwenden
         zoomed_nx = (nx - 0.5) * self.zoom_level + 0.5 - self.pan_offset[0]
         zoomed_ny = (ny - 0.5) * self.zoom_level + 0.5 - self.pan_offset[1]
+
         return int(x + zoomed_nx * w), int(y + zoomed_ny * h)
 
     def _pixel_to_norm(self, px: int, py: int) -> Tuple[float, float]:
@@ -201,10 +231,15 @@ class PolygonCanvas(QWidget):
         x, y, w, h = self._calc_canvas_rect()
         w = max(1, w)
         h = max(1, h)
+
+        # Relative Position im Canvas
         rel_x = (px - x) / w
         rel_y = (py - y) / h
+
+        # Zoom und Pan rueckrechnen
         nx = (rel_x + self.pan_offset[0] - 0.5) / self.zoom_level + 0.5
         ny = (rel_y + self.pan_offset[1] - 0.5) / self.zoom_level + 0.5
+
         return nx, ny
 
     def _find_point_at(self, x: int, y: int) -> Optional[int]:
@@ -220,14 +255,19 @@ class PolygonCanvas(QWidget):
     def _find_polygon_at(self, x: int, y: int) -> Optional[Polygon]:
         """Finde ein Polygon an der gegebenen Position."""
         norm_x, norm_y = self._pixel_to_norm(x, y)
+
+        # Zuerst aktuelles Polygon pruefen
         if self.current_polygon:
             if self._point_in_polygon(norm_x, norm_y, self.current_polygon):
                 return self.current_polygon
+
+        # Dann alle anderen Polygone
         for poly in self.all_polygons:
             if poly == self.current_polygon:
                 continue
             if self._point_in_polygon(norm_x, norm_y, poly):
                 return poly
+
         return None
 
     def _point_in_polygon(self, nx: float, ny: float, polygon: Polygon) -> bool:
@@ -235,6 +275,7 @@ class PolygonCanvas(QWidget):
         points = polygon.source_points if self.mode == "source" else polygon.output_points
         if len(points) < 3:
             return False
+
         n = len(points)
         inside = False
         j = n - 1
@@ -247,6 +288,7 @@ class PolygonCanvas(QWidget):
         return inside
 
     def _get_polygon_center(self, points: List[List[float]]) -> Tuple[float, float]:
+        """Berechne Zentrum eines Polygons (Durchschnitt aller Punkte)."""
         if not points:
             return 0.5, 0.5
         cx = sum(p[0] for p in points) / len(points)
@@ -254,15 +296,21 @@ class PolygonCanvas(QWidget):
         return cx, cy
 
     def _get_rotation_handle_pos(self, points: List[List[float]]) -> Tuple[int, int]:
+        """Berechne Position des Rotations-Handles (oberhalb des Polygons)."""
         if not points:
             return 0, 0
+
+        # Finde obersten Punkt
         min_y = min(p[1] for p in points)
         cx, _ = self._get_polygon_center(points)
+
+        # Handle oberhalb des obersten Punkts
         px, py = self._norm_to_pixel(cx, min_y)
         py -= self.rotation_handle_distance
         return px, py
 
     def _get_corner_handle_positions(self, points: List[List[float]]) -> List[Tuple[int, int]]:
+        """Berechne Positionen der Eck-Handles (zum Skalieren)."""
         positions = []
         for p in points:
             px, py = self._norm_to_pixel(p[0], p[1])
@@ -270,48 +318,61 @@ class PolygonCanvas(QWidget):
         return positions
 
     def _get_center_handle_pos(self, points: List[List[float]]) -> Tuple[int, int]:
+        """Berechne Position des Center-Handles."""
         cx, cy = self._get_polygon_center(points)
         return self._norm_to_pixel(cx, cy)
 
     def _find_handle_at(self, x: int, y: int) -> Tuple[HandleType, int]:
+        """
+        Finde welcher Handle an der Position ist.
+        Returns: (HandleType, corner_index) wobei corner_index nur fuer CORNER/POINT relevant ist.
+        """
         points = self.get_points()
         if not points or not self.current_polygon:
             return HandleType.NONE, -1
 
+        # Rotation Handle (hoechste Prioritaet)
         rx, ry = self._get_rotation_handle_pos(points)
         if ((x - rx) ** 2 + (y - ry) ** 2) ** 0.5 <= self.handle_radius + 5:
             return HandleType.ROTATE, -1
 
+        # Corner/Point Handles
         corner_positions = self._get_corner_handle_positions(points)
         for i, (px, py) in enumerate(corner_positions):
             dist = ((x - px) ** 2 + (y - py) ** 2) ** 0.5
             if dist <= self.hit_radius:
                 return HandleType.POINT, i
 
+        # Center Handle
         cx, cy = self._get_center_handle_pos(points)
         if ((x - cx) ** 2 + (y - cy) ** 2) ** 0.5 <= self.handle_radius + 5:
             return HandleType.CENTER, -1
 
+        # Im Polygon drin = auch Center (verschieben)
         if self._is_inside_shape(x, y):
             return HandleType.CENTER, -1
 
         return HandleType.NONE, -1
 
     def _get_cursor_for_handle(self, handle_type: HandleType, corner: int = -1) -> QCursor:
+        """Hole passenden Cursor fuer Handle-Typ."""
         if handle_type == HandleType.ROTATE:
+            # Rotation: CrossCursor als Platzhalter (idealerweise custom)
             return QCursor(Qt.CursorShape.CrossCursor)
         elif handle_type == HandleType.POINT:
             return QCursor(Qt.CursorShape.CrossCursor)
         elif handle_type == HandleType.CORNER:
-            if corner in [0, 2]:
+            # Diagonal resize basierend auf Ecke
+            if corner in [0, 2]:  # TL, BR
                 return QCursor(Qt.CursorShape.SizeFDiagCursor)
-            else:
+            else:  # TR, BL
                 return QCursor(Qt.CursorShape.SizeBDiagCursor)
         elif handle_type == HandleType.CENTER:
             return QCursor(Qt.CursorShape.SizeAllCursor)
         return QCursor(Qt.CursorShape.ArrowCursor)
 
     def _rotate_point(self, px: float, py: float, cx: float, cy: float, angle: float) -> Tuple[float, float]:
+        """Rotiere einen Punkt um ein Zentrum."""
         cos_a = math.cos(angle)
         sin_a = math.sin(angle)
         dx = px - cx
@@ -322,70 +383,129 @@ class PolygonCanvas(QWidget):
 
     def _scale_points(self, points: List[List[float]], center: Tuple[float, float],
                       scale_x: float, scale_y: float) -> List[List[float]]:
+        """Skaliere Punkte um ein Zentrum."""
         cx, cy = center
         result = []
         for px, py in points:
             new_x = cx + (px - cx) * scale_x
             new_y = cy + (py - cy) * scale_y
+            # Clamp auf [0, 1]
             new_x = max(0.0, min(1.0, new_x))
             new_y = max(0.0, min(1.0, new_y))
             result.append([new_x, new_y])
         return result
 
-    def _get_all_snap_points(self) -> List[Tuple[float, float]]:
-        """Hole alle Punkte aller Polygone fuer Grid-Snapping."""
-        snap_points = []
+    def _get_other_snap_data(self) -> Tuple[List[Tuple[float, float]], List[Tuple[Tuple[float, float], Tuple[float, float]]]]:
+        """Hole Ecken und Kanten aller anderen Polygone fuer Snapping.
+
+        Returns:
+            (corners, edges) wobei edges eine Liste von (p1, p2) Tupeln ist.
+        """
+        corners = []
+        edges = []
+
         for poly in self.all_polygons:
+            if poly == self.current_polygon:
+                continue
             points = poly.source_points if self.mode == "source" else poly.output_points
             for i, (px, py) in enumerate(points):
-                if poly == self.current_polygon and i == self.selected_point:
-                    continue
-                snap_points.append((px, py))
-        return snap_points
+                corners.append((px, py))
+                # Kante von diesem Punkt zum naechsten
+                nx_p, ny_p = points[(i + 1) % len(points)]
+                edges.append(((px, py), (nx_p, ny_p)))
 
-    def _find_connected_points(self, poly: Polygon, point_idx: int) -> List[Tuple[Polygon, int]]:
+        return corners, edges
+
+    @staticmethod
+    def _point_to_edge_snap(px: float, py: float,
+                            e1: Tuple[float, float], e2: Tuple[float, float]) -> Tuple[float, float, float]:
+        """Berechne naechsten Punkt auf einer Kante und Distanz.
+
+        Returns: (snap_x, snap_y, distance)
         """
-        Finde magnetisch verbundene Punkte an der gleichen Position.
-        Wird beim Start des Draggings aufgerufen.
-        """
-        if not self.snapping_enabled:
-            return []
+        ax, ay = e1
+        bx, by = e2
+        abx, aby = bx - ax, by - ay
+        ab_len_sq = abx * abx + aby * aby
+        if ab_len_sq < 1e-12:
+            return ax, ay, ((px - ax) ** 2 + (py - ay) ** 2) ** 0.5
 
-        connected = []
-        current_points = poly.source_points if self.mode == "source" else poly.output_points
-        px, py = current_points[point_idx]
-
-        # Toleranz fuer Magnetismus (abhaengig vom Zoom)
-        threshold = 0.015 / self.zoom_level
-
-        for other_poly in self.all_polygons:
-            if other_poly == poly:
-                continue
-
-            other_points = other_poly.source_points if self.mode == "source" else other_poly.output_points
-            for i, (ox, oy) in enumerate(other_points):
-                dist = ((px - ox) ** 2 + (py - oy) ** 2) ** 0.5
-                if dist < threshold:
-                    connected.append((other_poly, i))
-
-        return connected
+        t = max(0.0, min(1.0, ((px - ax) * abx + (py - ay) * aby) / ab_len_sq))
+        snap_x = ax + t * abx
+        snap_y = ay + t * aby
+        dist = ((px - snap_x) ** 2 + (py - snap_y) ** 2) ** 0.5
+        return snap_x, snap_y, dist
 
     def _apply_snapping(self, nx: float, ny: float) -> Tuple[float, float]:
-        """Wende Grid-Snapping an falls aktiviert."""
+        """Wende Punkt-Snapping an (Ecke-zu-Ecke, dann Ecke-zu-Kante)."""
         if not self.snapping_enabled:
             return nx, ny
 
-        snap_points = self._get_all_snap_points()
-        min_dist = float('inf')
+        corners, edges = self._get_other_snap_data()
+        best_dist = float('inf')
         snapped_x, snapped_y = nx, ny
+        is_corner_snap = False
 
-        for sx, sy in snap_points:
+        # Ecke-zu-Ecke (Prioritaet)
+        for sx, sy in corners:
             dist = ((nx - sx) ** 2 + (ny - sy) ** 2) ** 0.5
-            if dist < min_dist and dist < self.snap_distance:
-                min_dist = dist
+            if dist < self.snap_distance and dist < best_dist:
+                best_dist = dist
                 snapped_x, snapped_y = sx, sy
+                is_corner_snap = True
+
+        # Ecke-zu-Kante (Fallback)
+        if not is_corner_snap:
+            for e1, e2 in edges:
+                sx, sy, dist = self._point_to_edge_snap(nx, ny, e1, e2)
+                if dist < self.snap_distance and dist < best_dist:
+                    best_dist = dist
+                    snapped_x, snapped_y = sx, sy
 
         return snapped_x, snapped_y
+
+    def _apply_shape_snapping(self, new_points: List[List[float]]) -> List[List[float]]:
+        """Wende Snapping fuer ein ganzes Polygon an.
+
+        Prueft alle Ecken des verschobenen Polygons gegen Ecken und Kanten
+        anderer Polygone. Ecke-zu-Ecke hat Prioritaet vor Ecke-zu-Kante.
+        """
+        if not self.snapping_enabled:
+            return new_points
+
+        corners, edges = self._get_other_snap_data()
+        if not corners and not edges:
+            return new_points
+
+        best_dx, best_dy = 0.0, 0.0
+        best_dist = float('inf')
+        best_is_corner = False
+
+        for px, py in new_points:
+            # Ecke-zu-Ecke
+            for sx, sy in corners:
+                dist = ((px - sx) ** 2 + (py - sy) ** 2) ** 0.5
+                if dist < self.snap_distance:
+                    # Ecke-zu-Ecke hat Prioritaet
+                    if not best_is_corner or dist < best_dist:
+                        best_dist = dist
+                        best_dx = sx - px
+                        best_dy = sy - py
+                        best_is_corner = True
+
+            # Ecke-zu-Kante (nur wenn kein Ecke-zu-Ecke gefunden)
+            if not best_is_corner:
+                for e1, e2 in edges:
+                    snap_x, snap_y, dist = self._point_to_edge_snap(px, py, e1, e2)
+                    if dist < self.snap_distance and dist < best_dist:
+                        best_dist = dist
+                        best_dx = snap_x - px
+                        best_dy = snap_y - py
+
+        if best_dist < self.snap_distance:
+            return [[p[0] + best_dx, p[1] + best_dy] for p in new_points]
+
+        return new_points
 
     def paintEvent(self, event: QPaintEvent) -> None:
         painter = QPainter(self)
@@ -394,9 +514,13 @@ class PolygonCanvas(QWidget):
         # Hintergrund
         painter.fillRect(self.rect(), QColor(30, 30, 30))
 
-        # Canvas-Bereich
+        # Canvas-Bereich mit Aspect Ratio
         cx, cy, cw, ch = self._calc_canvas_rect()
+
+        # Canvas-Hintergrund
         painter.fillRect(cx, cy, cw, ch, QColor(50, 50, 50))
+
+        # Clipping auf Canvas-Bereich
         painter.setClipRect(cx, cy, cw, ch)
 
         if self.mode == "source":
@@ -404,31 +528,15 @@ class PolygonCanvas(QWidget):
         else:
             self._draw_output_view(painter)
 
-        # Visueller Indikator fuer magnetische Verbindung
-        if self.dragging and self.connected_points_indices and not self.detach_magnetic:
-            painter.setPen(QPen(QColor(255, 255, 0), 2, Qt.PenStyle.DashLine))
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-
-            # Zeichne Ring um Cursor
-            points = self.get_points()
-            if self.selected_point is not None and self.selected_point < len(points):
-                px, py = self._norm_to_pixel(points[self.selected_point][0], points[self.selected_point][1])
-                painter.drawEllipse(QPoint(px, py), self.point_radius + 6, self.point_radius + 6)
-
         painter.setClipping(False)
 
-        # Labels
+        # Kleine Labels
         painter.setPen(QColor(150, 150, 150))
         label = "Source" if self.mode == "source" else "Output"
         if self.zoom_level != 1.0:
             label += f" ({self.zoom_level:.1f}x)"
         if self.snapping_enabled:
             label += " [Snap]"
-        if self.detach_magnetic:
-            label += " [Detach]"
-        elif self.connected_points_indices:
-            label += f" [Linked: {len(self.connected_points_indices)}]"
-
         painter.drawText(cx + 5, cy + 15, label)
 
         # Handle-Hints
@@ -442,7 +550,7 @@ class PolygonCanvas(QWidget):
                 if self.maintain_aspect_ratio:
                     hints.append("Scale (uniform)")
                 else:
-                    hints.append("Drag | Alt: Detach | Shift: Scale")
+                    hints.append("Drag point | Shift: Scale")
 
             if hints:
                 hint_text = " | ".join(hints)
@@ -452,55 +560,86 @@ class PolygonCanvas(QWidget):
         painter.end()
 
     def _draw_source_view(self, painter: QPainter) -> None:
-        """Zeichne Source-Ansicht."""
+        """Zeichne Source-Ansicht mit Bild und allen Polygonen."""
         cx, cy, cw, ch = self._calc_canvas_rect()
+
+        # Bild zeichnen
         if self.pixmap:
+            # Skalieren auf Canvas-Groesse und Zoom anwenden
             scaled_w = int(cw * self.zoom_level)
             scaled_h = int(ch * self.zoom_level)
+
             if scaled_w > 0 and scaled_h > 0:
                 scaled = self.pixmap.scaled(
                     scaled_w, scaled_h,
                     Qt.AspectRatioMode.IgnoreAspectRatio,
                     Qt.TransformationMode.SmoothTransformation
                 )
-                img_x = cx + int(-self.pan_offset[0] * cw) + int((cw - scaled_w) / 2)
-                img_y = cy + int(-self.pan_offset[1] * ch) + int((ch - scaled_h) / 2)
+
+                # Position mit Pan
+                img_x = cx + int(-self.pan_offset[0] * cw)
+                img_y = cy + int(-self.pan_offset[1] * ch)
+
+                # Zentrieren bei Zoom
+                img_x += int((cw - scaled_w) / 2)
+                img_y += int((ch - scaled_h) / 2)
+
                 painter.drawPixmap(img_x, img_y, scaled)
 
+        # Alle Polygone zeichnen
         self._draw_all_polygons(painter)
+
+        # Kein Polygon-Hinweis
         if not self.all_polygons:
             painter.setPen(QColor(120, 120, 120))
-            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "Kein Polygon ausgewaehlt")
+            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter,
+                             "Kein Polygon ausgewaehlt")
 
     def _draw_output_view(self, painter: QPainter) -> None:
-        """Zeichne Output-Ansicht."""
+        """Zeichne Output-Ansicht als Live-Preview."""
+        cx, cy, cw, ch = self._calc_canvas_rect()
+
+        # Composite aller Polygone rendern
         self._draw_composite_preview(painter)
+
+        # Dann Edit-Overlay fuer alle Polygone
         self._draw_all_polygons(painter)
+
+        # Kein Polygon-Hinweis
         if not self.all_polygons:
             painter.setPen(QColor(120, 120, 120))
-            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "Kein Polygon ausgewaehlt")
+            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter,
+                             "Kein Polygon ausgewaehlt")
 
     def _draw_composite_preview(self, painter: QPainter) -> None:
+        """Zeichne Composite-Preview - optimiert mit Buffer-Reuse."""
         cx, cy, cw, ch = self._calc_canvas_rect()
+
         if cw <= 0 or ch <= 0 or not self.project:
             return
 
+        # Composite-Groesse anpassen fuer Zoom
         render_w = int(cw * self.zoom_level)
         render_h = int(ch * self.zoom_level)
+
         if render_w <= 0 or render_h <= 0:
             return
 
+        # Buffer bei Groessenaenderung neu erstellen
         if self._last_render_size != (render_w, render_h):
             self._render_buffer = np.zeros((render_h, render_w, 3), dtype=np.uint8)
             self._last_render_size = (render_w, render_h)
 
         polygons_data = []
+
         for poly in self.all_polygons:
             if not poly.media_layer_id:
                 continue
+
             media_layer = self.project.get_media_layer_by_id(poly.media_layer_id)
             if not media_layer or not media_layer.visible or not media_layer.media_id:
                 continue
+
             image = self.all_images.get(media_layer.media_id)
             if image is not None:
                 polygons_data.append((image, poly.source_points, poly.output_points))
@@ -514,14 +653,19 @@ class PolygonCanvas(QWidget):
                 painter.drawImage(img_x, img_y, qimg)
 
     def _draw_all_polygons(self, painter: QPainter) -> None:
+        """Zeichne alle Polygone."""
+        # Zuerst nicht-aktive Polygone (grau)
         for poly in self.all_polygons:
             if poly == self.current_polygon:
                 continue
             self._draw_polygon(painter, poly, is_current=False)
+
+        # Dann aktuelles Polygon
         if self.current_polygon:
             self._draw_polygon(painter, self.current_polygon, is_current=True)
 
     def _draw_polygon(self, painter: QPainter, polygon: Polygon, is_current: bool) -> None:
+        """Zeichne ein einzelnes Polygon mit Punkten und Kanten."""
         if self.mode == "source":
             points = polygon.source_points
         else:
@@ -532,11 +676,15 @@ class PolygonCanvas(QWidget):
 
         pixel_points = [self._norm_to_pixel(p[0], p[1]) for p in points]
 
+        # Diagonalen (Hilfslinien) bei 4 Punkten - nur fuer aktuelles Polygon
         if len(pixel_points) >= 4 and is_current:
             painter.setPen(QPen(QColor(0, 100, 100, 150), 1, Qt.PenStyle.DashLine))
-            painter.drawLine(pixel_points[0][0], pixel_points[0][1], pixel_points[2][0], pixel_points[2][1])
-            painter.drawLine(pixel_points[1][0], pixel_points[1][1], pixel_points[3][0], pixel_points[3][1])
+            painter.drawLine(pixel_points[0][0], pixel_points[0][1],
+                             pixel_points[2][0], pixel_points[2][1])
+            painter.drawLine(pixel_points[1][0], pixel_points[1][1],
+                             pixel_points[3][0], pixel_points[3][1])
 
+        # Gefuelltes Polygon (halbtransparent)
         if is_current:
             painter.setBrush(QBrush(QColor(0, 150, 255, 40)))
         else:
@@ -545,6 +693,7 @@ class PolygonCanvas(QWidget):
         qpoly = QPolygon([QPoint(p[0], p[1]) for p in pixel_points])
         painter.drawPolygon(qpoly)
 
+        # Kanten
         if is_current:
             painter.setPen(QPen(QColor(0, 200, 255), 2))
         else:
@@ -555,7 +704,9 @@ class PolygonCanvas(QWidget):
             p2 = pixel_points[(i + 1) % len(pixel_points)]
             painter.drawLine(p1[0], p1[1], p2[0], p2[1])
 
+        # Punkte und Handles
         if is_current:
+            # Eck-Punkte mit Nummern
             for i, (px, py) in enumerate(pixel_points):
                 is_hovered = (self.hovered_handle == HandleType.POINT and self.hovered_corner == i)
                 is_selected = (i == self.selected_point)
@@ -575,44 +726,66 @@ class PolygonCanvas(QWidget):
                     radius = self.point_radius
 
                 painter.drawEllipse(QPoint(px, py), radius, radius)
+
+                # Punkt-Nummer
                 painter.setPen(QColor(255, 255, 255))
                 painter.drawText(px - 4, py + 4, str(i + 1))
 
+            # Center Handle (Move Icon)
             cx, cy = self._get_center_handle_pos(points)
+            is_center_hovered = self.hovered_handle == HandleType.CENTER
             is_center_active = self.active_handle == HandleType.CENTER
+
             if is_center_active:
                 painter.setBrush(QBrush(QColor(255, 200, 80)))
-            elif self.hovered_handle == HandleType.CENTER:
+            elif is_center_hovered:
                 painter.setBrush(QBrush(QColor(255, 255, 150)))
             else:
                 painter.setBrush(QBrush(QColor(200, 200, 200, 180)))
             painter.setPen(QPen(QColor(50, 50, 50), 2))
             painter.drawEllipse(QPoint(cx, cy), self.handle_radius, self.handle_radius)
-            painter.drawLine(cx - 4, cy, cx + 4, cy)
-            painter.drawLine(cx, cy - 4, cx, cy + 4)
 
+            # Move-Kreuz im Center
+            painter.setPen(QPen(QColor(50, 50, 50), 2))
+            cross_size = 4
+            painter.drawLine(cx - cross_size, cy, cx + cross_size, cy)
+            painter.drawLine(cx, cy - cross_size, cx, cy + cross_size)
+
+            # Rotation Handle
             rx, ry = self._get_rotation_handle_pos(points)
+            is_rotate_hovered = self.hovered_handle == HandleType.ROTATE
+            is_rotate_active = self.active_handle == HandleType.ROTATE
+
+            # Linie vom Polygon zum Rotation Handle
             top_y = min(p[1] for p in pixel_points)
             painter.setPen(QPen(QColor(150, 150, 255, 150), 1, Qt.PenStyle.DashLine))
             painter.drawLine(cx, int(top_y), rx, ry)
 
-            if self.active_handle == HandleType.ROTATE:
+            # Rotation Handle Kreis
+            if is_rotate_active:
                 painter.setBrush(QBrush(QColor(150, 150, 255)))
-            elif self.hovered_handle == HandleType.ROTATE:
+            elif is_rotate_hovered:
                 painter.setBrush(QBrush(QColor(200, 200, 255)))
             else:
                 painter.setBrush(QBrush(QColor(100, 100, 200, 180)))
             painter.setPen(QPen(QColor(255, 255, 255), 2))
             painter.drawEllipse(QPoint(rx, ry), self.handle_radius, self.handle_radius)
 
+            # Rotation Icon (gebogener Pfeil)
+            painter.setPen(QPen(QColor(255, 255, 255), 2))
+            # Einfacher Bogen
             from PyQt6.QtCore import QRect
-            painter.drawArc(QRect(rx - 4, ry - 4, 8, 8), 0, 270 * 16)
+            arc_rect = QRect(rx - 4, ry - 4, 8, 8)
+            painter.drawArc(arc_rect, 0, 270 * 16)  # 270 Grad Bogen
 
         else:
+            # Nicht-aktuelles Polygon: Kleine Punkte
             for px, py in pixel_points:
                 painter.setBrush(QBrush(QColor(150, 150, 150)))
                 painter.setPen(QPen(QColor(200, 200, 200), 1))
                 painter.drawEllipse(QPoint(px, py), 5, 5)
+
+            # Name in der Mitte
             if pixel_points:
                 center_x = sum(p[0] for p in pixel_points) // len(pixel_points)
                 center_y = sum(p[1] for p in pixel_points) // len(pixel_points)
@@ -620,23 +793,30 @@ class PolygonCanvas(QWidget):
                 painter.drawText(center_x - 20, center_y, polygon.name)
 
     def _is_inside_shape(self, x: int, y: int) -> bool:
+        """Pruefe ob Punkt innerhalb des aktuellen Shapes liegt."""
         points = self.get_points()
         if len(points) < 3:
             return False
+
+        # Ray casting algorithm
         nx, ny = self._pixel_to_norm(x, y)
         n = len(points)
         inside = False
+
         j = n - 1
         for i in range(n):
             xi, yi = points[i]
             xj, yj = points[j]
+
             if ((yi > ny) != (yj > ny)) and (nx < (xj - xi) * (ny - yi) / (yj - yi) + xi):
                 inside = not inside
             j = i
+
         return inside
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
         if event.button() == Qt.MouseButton.MiddleButton:
+            # Pan starten
             self.panning = True
             self.pan_start = event.position()
             self.pan_start_offset = self.pan_offset.copy()
@@ -646,9 +826,10 @@ class PolygonCanvas(QWidget):
         if event.button() == Qt.MouseButton.LeftButton:
             x, y = int(event.position().x()), int(event.position().y())
 
+            # Shift-Taste pruefen fuer Aspect Ratio Lock
             self.maintain_aspect_ratio = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
-            self.detach_magnetic = bool(event.modifiers() & Qt.KeyboardModifier.AltModifier)
 
+            # Handle finden
             handle_type, corner = self._find_handle_at(x, y)
 
             if handle_type != HandleType.NONE and self.current_polygon:
@@ -659,16 +840,8 @@ class PolygonCanvas(QWidget):
                 self.drag_start_points = [p.copy() for p in points]
                 self.drag_start_center = self._get_polygon_center(points)
 
-                # --- Magnetic Logic ---
-                self.connected_points_indices = []
-                if handle_type == HandleType.POINT and not self.detach_magnetic:
-                    neighbors = self._find_connected_points(self.current_polygon, corner)
-                    for n_poly, n_idx in neighbors:
-                        pts = n_poly.source_points if self.mode == "source" else n_poly.output_points
-                        start_pos = pts[n_idx].copy()
-                        self.connected_points_indices.append((n_poly, n_idx, start_pos))
-
                 if handle_type == HandleType.ROTATE:
+                    # Start-Winkel berechnen
                     cx, cy = self.drag_start_center
                     nx, ny = self._pixel_to_norm(x, y)
                     self.drag_start_angle = math.atan2(ny - cy, nx - cx)
@@ -686,26 +859,27 @@ class PolygonCanvas(QWidget):
                     self.dragging = False
                     self.dragging_shape = False
             else:
+                # Pruefen ob anderes Polygon angeklickt wurde
                 poly = self._find_polygon_at(x, y)
                 if poly is not None and poly != self.current_polygon:
+                    # Anderes Polygon auswaehlen - Signal senden
                     self.polygon_selected.emit(poly)
                 self.active_handle = HandleType.NONE
                 self.active_corner = -1
                 self.selected_point = None
                 self.dragging = False
                 self.dragging_shape = False
-                self.connected_points_indices = []
 
             self.update()
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
         x, y = int(event.position().x()), int(event.position().y())
 
+        # Shift-Taste pruefen
         self.maintain_aspect_ratio = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
-        # Update auch waehrend Drag, falls User Alt drueckt/loslaesst
-        self.detach_magnetic = bool(event.modifiers() & Qt.KeyboardModifier.AltModifier)
 
         if self.panning and self.pan_start and self.pan_start_offset:
+            # Pan durchfuehren
             cx, cy, cw, ch = self._calc_canvas_rect()
             if cw > 0 and ch > 0:
                 dx = (event.position().x() - self.pan_start.x()) / cw
@@ -717,46 +891,53 @@ class PolygonCanvas(QWidget):
 
         nx, ny = self._pixel_to_norm(x, y)
 
+        # Aktiver Handle - Interaktion laeuft
         if self.active_handle != HandleType.NONE and self.current_polygon and self.drag_start_points:
             if self.active_handle == HandleType.POINT:
                 if self.maintain_aspect_ratio and self.drag_start_center:
+                    # Shift gedrueckt: Uniform scaling vom Zentrum
                     cx, cy = self.drag_start_center
                     orig_corner = self.drag_start_points[self.active_corner]
+
+                    # Urspruengliche Distanz zum Zentrum
                     orig_dist = math.sqrt((orig_corner[0] - cx) ** 2 + (orig_corner[1] - cy) ** 2)
                     if orig_dist > 0.001:
+                        # Neue Distanz zum Zentrum
                         new_dist = math.sqrt((nx - cx) ** 2 + (ny - cy) ** 2)
                         scale = new_dist / orig_dist
+
+                        # Alle Punkte skalieren
                         new_points = self._scale_points(self.drag_start_points, (cx, cy), scale, scale)
+
                         if self.mode == "source":
                             self.current_polygon.source_points = new_points
                         else:
                             self.current_polygon.output_points = new_points
                 else:
+                    # Einzelnen Punkt verschieben
                     nx = max(0.0, min(1.0, nx))
                     ny = max(0.0, min(1.0, ny))
                     nx, ny = self._apply_snapping(nx, ny)
 
-                    # Update aktives Polygon
                     if self.mode == "source":
                         self.current_polygon.source_points[self.active_corner] = [nx, ny]
                     else:
                         self.current_polygon.output_points[self.active_corner] = [nx, ny]
 
-                    # Update verbundene Punkte (Magnetic)
-                    if self.connected_points_indices and not self.detach_magnetic:
-                        for other_poly, other_idx, _ in self.connected_points_indices:
-                            target_pts = other_poly.source_points if self.mode == "source" else other_poly.output_points
-                            target_pts[other_idx] = [nx, ny]
-
             elif self.active_handle == HandleType.CENTER:
+                # Ganzes Polygon verschieben
                 start_nx, start_ny = self.drag_start
                 dx = nx - start_nx
                 dy = ny - start_ny
+
                 new_points = []
                 for px, py in self.drag_start_points:
                     new_x = max(0.0, min(1.0, px + dx))
                     new_y = max(0.0, min(1.0, py + dy))
                     new_points.append([new_x, new_y])
+
+                # Shape-Snapping anwenden
+                new_points = self._apply_shape_snapping(new_points)
 
                 if self.mode == "source":
                     self.current_polygon.source_points = new_points
@@ -764,9 +945,11 @@ class PolygonCanvas(QWidget):
                     self.current_polygon.output_points = new_points
 
             elif self.active_handle == HandleType.ROTATE:
+                # Rotation um Zentrum
                 cx, cy = self.drag_start_center
                 current_angle = math.atan2(ny - cy, nx - cx)
                 delta_angle = current_angle - self.drag_start_angle
+
                 new_points = []
                 for px, py in self.drag_start_points:
                     new_x, new_y = self._rotate_point(px, py, cx, cy, delta_angle)
@@ -783,11 +966,14 @@ class PolygonCanvas(QWidget):
             self.points_changed.emit()
             return
 
+        # Kein aktiver Handle - Hover-Feedback aktualisieren
         if self.current_polygon:
             old_hovered = self.hovered_handle
             old_corner = self.hovered_corner
             self.hovered_handle, self.hovered_corner = self._find_handle_at(x, y)
+
             if self.hovered_handle != old_hovered or self.hovered_corner != old_corner:
+                # Cursor aktualisieren
                 self.setCursor(self._get_cursor_for_handle(self.hovered_handle, self.hovered_corner))
                 self.update()
 
@@ -808,15 +994,17 @@ class PolygonCanvas(QWidget):
             self.drag_start_points = None
             self.drag_start_center = None
             self.drag_start_angle = 0.0
-            self.connected_points_indices = []  # Reset magnetic connections
 
+            # Cursor zuruecksetzen auf Hover-Status
             x, y = int(event.position().x()), int(event.position().y())
             self.hovered_handle, self.hovered_corner = self._find_handle_at(x, y)
             self.setCursor(self._get_cursor_for_handle(self.hovered_handle, self.hovered_corner))
             self.update()
 
     def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:
+        """Doppelklick: Zoom zuruecksetzen."""
         if event.button() == Qt.MouseButton.LeftButton:
+            # Pruefen ob Klick auf leeren Bereich
             x, y = int(event.position().x()), int(event.position().y())
             if self._find_point_at(x, y) is None and not self._is_inside_shape(x, y):
                 self.zoom_level = 1.0
@@ -824,49 +1012,89 @@ class PolygonCanvas(QWidget):
                 self.update()
 
     def wheelEvent(self, event: QWheelEvent) -> None:
+        """Mausrad: Zoomen."""
         delta = event.angleDelta().y()
         if delta == 0:
             return
+
+        # Zoom-Faktor
         zoom_factor = 1.15 if delta > 0 else 1 / 1.15
         new_zoom = self.zoom_level * zoom_factor
         new_zoom = max(0.5, min(5.0, new_zoom))
+
         if new_zoom != self.zoom_level:
+            # Zoom zentriert auf Mausposition
             pos = event.position()
             cx, cy, cw, ch = self._calc_canvas_rect()
+
             if cw > 0 and ch > 0:
+                # Position relativ zum Canvas-Zentrum
                 rel_x = (pos.x() - cx) / cw - 0.5
                 rel_y = (pos.y() - cy) / ch - 0.5
+
+                # Pan anpassen um auf Mausposition zu zoomen
                 scale_change = new_zoom / self.zoom_level
                 self.pan_offset[0] += rel_x * (1 - scale_change) / new_zoom
                 self.pan_offset[1] += rel_y * (1 - scale_change) / new_zoom
+
             self.zoom_level = new_zoom
             self.update()
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
-        if self.selected_point is None or not self.current_polygon:
+        """Pfeiltasten: Punkt oder ganzes Polygon verschieben. Shift = fein."""
+        if not self.current_polygon:
             return
+
+        key = event.key()
+        if key not in (Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Up, Qt.Key.Key_Down):
+            return
+
+        # Shift = fein, normal = grob
         if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
-            step = 0.02
+            step = 0.001
         else:
             step = 0.005
+
+        dx, dy = 0.0, 0.0
+        if key == Qt.Key.Key_Left:
+            dx = -step
+        elif key == Qt.Key.Key_Right:
+            dx = step
+        elif key == Qt.Key.Key_Up:
+            dy = -step
+        elif key == Qt.Key.Key_Down:
+            dy = step
+
         points = self.get_points()
-        if not points or self.selected_point >= len(points):
+        if not points:
             return
-        px, py = points[self.selected_point]
-        moved = False
-        if event.key() == Qt.Key.Key_Left:
-            px = max(0.0, px - step)
-            moved = True
-        elif event.key() == Qt.Key.Key_Right:
-            px = min(1.0, px + step)
-            moved = True
-        elif event.key() == Qt.Key.Key_Up:
-            py = max(0.0, py - step)
-            moved = True
-        elif event.key() == Qt.Key.Key_Down:
-            py = min(1.0, py + step)
-            moved = True
-        if moved:
-            points[self.selected_point] = [px, py]
-            self.update()
-            self.points_changed.emit()
+
+        if self.selected_point is not None and self.selected_point < len(points):
+            # Einzelnen Punkt verschieben
+            px, py = points[self.selected_point]
+            points[self.selected_point] = [
+                max(0.0, min(1.0, px + dx)),
+                max(0.0, min(1.0, py + dy))
+            ]
+        else:
+            # Ganzes Polygon verschieben
+            new_points = [
+                [max(0.0, min(1.0, p[0] + dx)), max(0.0, min(1.0, p[1] + dy))]
+                for p in points
+            ]
+            if self.mode == "source":
+                self.current_polygon.source_points = new_points
+            else:
+                self.current_polygon.output_points = new_points
+
+        self.update()
+        self.points_changed.emit()
+
+    def resizeEvent(self, event) -> None:
+        """Positioniere Fit-Button unten rechts."""
+        super().resizeEvent(event)
+        margin = 6
+        self._fit_btn.move(
+            self.width() - self._fit_btn.width() - margin,
+            self.height() - self._fit_btn.height() - margin
+        )

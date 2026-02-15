@@ -68,11 +68,11 @@ class OutputWindow(QWidget):
         self.update()
 
     def set_images(self, images: Dict[str, np.ndarray]) -> None:
-        """Setze alle Bilder."""
-        if self.images is not images:
-            self.images = images
-            self._dirty = True
-            self.update()
+        """Set all images."""
+        # Always update since this is only called when we want to update
+        self.images = images
+        self._dirty = True
+        self.update()
 
     # Legacy methods for compatibility
     def set_output(self, output: OutputLayer) -> None:

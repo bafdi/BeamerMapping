@@ -761,6 +761,7 @@ class MainWindow(QMainWindow):
             return
 
         self.images[media_id] = frame
+        self._mark_output_windows_dirty()
         self._update_canvas()
         self._update_output_windows()
 
@@ -1444,6 +1445,7 @@ class MainWindow(QMainWindow):
             image = load_image(filepath)
             if image is not None:
                 self.images[media.id] = image
+                self._mark_output_windows_dirty()
                 self._update_media_list()
                 self.statusbar.showMessage(f"Importiert: {media.name}")
             else:
@@ -1537,6 +1539,7 @@ class MainWindow(QMainWindow):
         # Generiere Pattern
         pattern = get_test_pattern(pattern_name)
         self.images[media.id] = pattern
+        self._mark_output_windows_dirty()
 
         self._update_media_list()
         self.statusbar.showMessage(f"Test-Pattern hinzugefuegt: {pattern_name}")
@@ -1746,16 +1749,17 @@ class MainWindow(QMainWindow):
                 window.setGeometry(screen.geometry())
             window.showFullScreen()
 
+    def _mark_output_windows_dirty(self) -> None:
+        """Mark all output windows as dirty (content changed)."""
+        for output_id, window in self.output_windows.items():
+            window._dirty = True
+
     def _update_output_windows(self) -> None:
-        """Update all open output windows - optimized with dirty flag."""
-        # Only update images when they have actually changed
+        """Update all open output windows."""
+        # Just trigger update - paintEvent will use dirty flag to skip if needed
         for output_id, window in self.output_windows.items():
             if window.isVisible():
-                # Only update when images have actually changed
-                if window.images is not self.images:
-                    window.images = self.images
-                    window._dirty = True
-                    window.update()
+                window.update()
 
     def _update_live_sources_and_canvas(self) -> None:
         """Aktualisiere Live-Quellen (Kameras, Screens) - separater langsamer Timer."""
@@ -1811,6 +1815,10 @@ class MainWindow(QMainWindow):
 
         # Cleanup: Schliesse Kameras/Screens die nicht mehr gebraucht werden
         self.live_source_manager.cleanup_inactive(active_cameras, active_screens)
+
+        # Mark output windows dirty if we captured any frames
+        if has_live:
+            self._mark_output_windows_dirty()
 
         return has_live
 
@@ -1962,6 +1970,9 @@ class MainWindow(QMainWindow):
             elif media.media_type == "test":
                 pattern_name = media.path.replace("test:", "")
                 self.images[media.id] = get_test_pattern(pattern_name)
+
+        # Mark output windows dirty after loading all media
+        self._mark_output_windows_dirty()
 
         self._update_trees()
         self._update_media_list()

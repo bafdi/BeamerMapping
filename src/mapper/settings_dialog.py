@@ -3,10 +3,11 @@
 from PyQt6.QtCore import QSettings
 from PyQt6.QtWidgets import (
     QDialog, QFormLayout, QComboBox, QCheckBox,
-    QDialogButtonBox, QSpinBox
+    QDialogButtonBox, QSpinBox, QLabel
 )
 
 
+SETTINGS_KEY_WARP_METHOD = "warp_method"
 SETTINGS_KEY_RENDERER = "renderer_backend"
 SETTINGS_KEY_SHOW_FPS = "show_fps"
 SETTINGS_KEY_FADE_DURATION = "freeze_blackout_fade_ms"
@@ -23,6 +24,27 @@ class SettingsDialog(QDialog):
 
         layout = QFormLayout(self)
 
+        # Warp-Methode
+        self.warp_combo = QComboBox()
+        self.warp_combo.addItem("Perspective (Homography)", "perspective")
+        self.warp_combo.addItem("Bilinear Mesh (20\u00d720)", "bilinear_mesh")
+
+        current_warp = self.settings.value(SETTINGS_KEY_WARP_METHOD, "perspective")
+        for i in range(self.warp_combo.count()):
+            if self.warp_combo.itemData(i) == current_warp:
+                self.warp_combo.setCurrentIndex(i)
+                break
+
+        layout.addRow("Warp Method:", self.warp_combo)
+
+        # Info-Label fuer Bilinear Mesh + OpenGL Hinweis
+        self.warp_info_label = QLabel()
+        self.warp_info_label.setWordWrap(True)
+        self.warp_info_label.setStyleSheet("color: gray; font-size: 11px;")
+        layout.addRow(self.warp_info_label)
+
+        self.warp_combo.currentIndexChanged.connect(self._update_warp_info)
+
         # Renderer Backend
         self.renderer_combo = QComboBox()
         self.renderer_combo.addItem("OpenCV (CPU)", "opencv")
@@ -35,6 +57,9 @@ class SettingsDialog(QDialog):
                 break
 
         layout.addRow("Renderer:", self.renderer_combo)
+
+        self.renderer_combo.currentIndexChanged.connect(self._update_warp_info)
+        self._update_warp_info()
 
         # FPS Anzeige
         self.fps_checkbox = QCheckBox("Show FPS in Output")
@@ -63,6 +88,10 @@ class SettingsDialog(QDialog):
     def _on_accept(self) -> None:
         """Speichere Einstellungen und schliesse Dialog."""
         self.settings.setValue(
+            SETTINGS_KEY_WARP_METHOD,
+            self.warp_combo.currentData()
+        )
+        self.settings.setValue(
             SETTINGS_KEY_RENDERER,
             self.renderer_combo.currentData()
         )
@@ -75,6 +104,25 @@ class SettingsDialog(QDialog):
             self.fade_spin.value()
         )
         self.accept()
+
+    def _update_warp_info(self) -> None:
+        """Aktualisiere Info-Label basierend auf Warp/Renderer Kombination."""
+        warp = self.warp_combo.currentData()
+        renderer = self.renderer_combo.currentData()
+        if warp == "bilinear_mesh" and renderer == "opengl":
+            self.warp_info_label.setText(
+                "Hinweis: Bilinear Mesh ist nicht mit OpenGL kompatibel. "
+                "Renderer faellt automatisch auf OpenCV zurueck."
+            )
+        elif warp == "bilinear_mesh":
+            self.warp_info_label.setText(
+                "Bilinear Mesh: Weicheres Warping (20\u00d720 Grid), aber langsamer als Perspective."
+            )
+        else:
+            self.warp_info_label.setText("")
+
+    def get_warp_method(self) -> str:
+        return self.warp_combo.currentData()
 
     def get_renderer_backend(self) -> str:
         return self.renderer_combo.currentData()

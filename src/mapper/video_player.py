@@ -505,7 +505,7 @@ class VideoPlayerWidget(QFrame):
                 self.play_btn.setText("Pause" if self.is_playing else "Play")
 
     def _sync_audio_video(self) -> None:
-        """Synchronisiere Audio mit Video (weniger haeufig aufgerufen)."""
+        """Synchronisiere Audio mit Video."""
         for media_id, decoder in self.decoders.items():
             if not decoder.playing:
                 continue
@@ -516,13 +516,24 @@ class VideoPlayerWidget(QFrame):
 
             player, _ = audio_data
 
-            # Sync nur wenn Differenz > 100ms
+            # Aktuelle Zeiten holen
             video_pos_ms = int(decoder.current_time * 1000)
             audio_pos_ms = player.position()
 
-            diff = abs(video_pos_ms - audio_pos_ms)
-            if diff > 150:
+            # Differenz berechnen
+            diff = video_pos_ms - audio_pos_ms
+
+            # OPTIMIERUNG: Strengere Logik für Sync
+            # Wenn Audio mehr als 100ms hinterher hinkt -> Seek Audio vorwärts
+            # Wenn Audio mehr als 100ms voraus ist -> Seek Audio rückwärts
+            if abs(diff) > 100:
+                # Wir vertrauen dem Video-Thread als "Master Clock"
                 player.setPosition(video_pos_ms)
+
+            # Loop-Sync Check:
+            # Wenn Video gerade neu gestartet ist (Zeit < 200ms) aber Audio noch am Ende ist
+            if video_pos_ms < 200 and audio_pos_ms > decoder.duration * 1000 - 1000:
+                player.setPosition(0)
 
     def _toggle_play(self) -> None:
         """Play/Pause toggle."""

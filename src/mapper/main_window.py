@@ -285,13 +285,13 @@ class CameraPreviewDialog(QDialog):
 
 from .canvas import PolygonCanvas
 from .output_window import OutputWindow
-from .transform import load_image, set_renderer_backend, get_renderer_backend
+from .transform import load_image, set_renderer_backend, get_renderer_backend, set_warp_method, get_warp_method
 from .test_patterns import TEST_PATTERNS, get_test_pattern
 from .live_sources import LiveSourceManager, CameraCapture
 from .video_player import VideoPlayerWidget
 from .queue_manager import QueueManager
 from .queue_grid import QueueGridWidget
-from .settings_dialog import SettingsDialog, SETTINGS_KEY_RENDERER, SETTINGS_KEY_SHOW_FPS, SETTINGS_KEY_FADE_DURATION
+from .settings_dialog import SettingsDialog, SETTINGS_KEY_WARP_METHOD, SETTINGS_KEY_RENDERER, SETTINGS_KEY_SHOW_FPS, SETTINGS_KEY_FADE_DURATION
 
 
 class MainWindow(QMainWindow):
@@ -1058,6 +1058,9 @@ class MainWindow(QMainWindow):
 
     def _on_video_frame_ready(self, media_id: str, frame: np.ndarray) -> None:
         """Handle neues Video-Frame."""
+        if not self.project.get_media_by_id(media_id):
+            return
+
         self.images[media_id] = frame
         self._update_canvas()
         self._update_output_windows()
@@ -2128,6 +2131,12 @@ class MainWindow(QMainWindow):
 
     def _apply_settings(self) -> None:
         """Lade und wende gespeicherte Einstellungen an."""
+        warp_method = self.settings.value(SETTINGS_KEY_WARP_METHOD, "perspective")
+        try:
+            set_warp_method(warp_method)
+        except ValueError:
+            set_warp_method("perspective")
+
         backend = self.settings.value(SETTINGS_KEY_RENDERER, "opencv")
         try:
             set_renderer_backend(backend)
@@ -2145,7 +2154,7 @@ class MainWindow(QMainWindow):
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self._apply_settings()
             self.statusbar.showMessage(
-                f"Settings saved (Renderer: {get_renderer_backend()})"
+                f"Settings saved (Warp: {get_warp_method()}, Renderer: {get_renderer_backend()})"
             )
 
     # === OUTPUT WINDOW ===

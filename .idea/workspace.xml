@@ -4,7 +4,9 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="cd8d36a0-b151-46a2-a5e0-3a98f7956d3b" name="Changes" comment=".app / .exe preparation" />
+    <list default="true" id="cd8d36a0-b151-46a2-a5e0-3a98f7956d3b" name="Changes" comment=".app / .exe preparation">
+      <change beforePath="$PROJECT_DIR$/PACKAGING.md" beforeDir="false" afterPath="$PROJECT_DIR$/PACKAGING.md" afterDir="false" />
+    </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
     <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />

@@ -89,7 +89,7 @@ Nach ~10-15 Min (wenn Build erfolgreich):
 2. Scrolle nach unten → **Artifacts**
 3. Lade herunter:
    - `BeamerMapping-macos-app` (`.app.zip`)
-   - `BeamericMapper-windows-exe` (`.exe`)
+   - `BeamerMapper-windows-exe` (`.exe`)
 
 ---
 
@@ -147,12 +147,12 @@ Ort: `.github/workflows/build.yml`
   run: |
     codesign --deep --force --options runtime \
       --sign "Developer ID Application: Your Name (TEAMID)" \
-      dist/BeamericMapper.app
+      dist/BeamerMapper.app
     
-    ditto -c -k --sequesterRsrc --keepParent dist/BeamericMapper.app BeamericMapper.app.zip
-    xcrun notarytool submit BeamericMapper.app.zip \
+    ditto -c -k --sequesterRsrc --keepParent dist/BeamerMapper.app BeamerMapper.app.zip
+    xcrun notarytool submit BeamerMapper.app.zip \
       --keychain-profile "AC_PASSWORD_PROFILE" --wait
-    xcrun stapler staple dist/BeamericMapper.app
+    xcrun stapler staple dist/BeamerMapper.app
 ```
 
 #### Windows Code Signing
@@ -161,7 +161,7 @@ Ort: `.github/workflows/build.yml`
 - name: Sign Windows exe
   run: |
     signtool sign /fd SHA256 /a /tr http://timestamp.digicert.com \
-      /td SHA256 /v dist/BeamericMapper.exe
+      /td SHA256 /v dist/BeamerMapper.exe
 ```
 
 **Hinweis:** Benötigt GitHub Secrets (z.B. `APPLE_DEVELOPER_ACCOUNT`, `WINDOWS_CERTIFICATE_PASSWORD`).

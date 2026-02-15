@@ -1752,7 +1752,7 @@ class MainWindow(QMainWindow):
     def _mark_output_windows_dirty(self) -> None:
         """Mark all output windows as dirty (content changed)."""
         for output_id, window in self.output_windows.items():
-            window._dirty = True
+            window.mark_dirty()
 
     def _update_output_windows(self) -> None:
         """Update all open output windows."""

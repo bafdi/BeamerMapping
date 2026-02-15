@@ -90,11 +90,15 @@ class OutputWindow(QWidget):
         self.update()
 
     def set_edit_mode(self, enabled: bool) -> None:
-        """Schalte Edit-Mode um."""
+        """Toggle edit mode."""
         self.edit_mode = enabled
         self.setCursor(Qt.CursorShape.CrossCursor if enabled else Qt.CursorShape.BlankCursor)
         self._dirty = True
         self.update()
+
+    def mark_dirty(self) -> None:
+        """Mark the window as needing a redraw."""
+        self._dirty = True
 
     def _norm_to_pixel(self, nx: float, ny: float) -> tuple[int, int]:
         return int(nx * self.width()), int(ny * self.height())

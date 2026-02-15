@@ -757,6 +757,9 @@ class MainWindow(QMainWindow):
 
     def _on_video_frame_ready(self, media_id: str, frame: np.ndarray) -> None:
         """Handle neues Video-Frame."""
+        if not self.project.get_media_by_id(media_id):
+            return
+
         self.images[media_id] = frame
         self._update_canvas()
         self._update_output_windows()

@@ -5,7 +5,15 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="cd8d36a0-b151-46a2-a5e0-3a98f7956d3b" name="Changes" comment="bugfixes">
-      <change beforePath="$PROJECT_DIR$/mapping_software.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/presets/test.json" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/presets/test2.json" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/presets/test3.json" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/presets/test4.json" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/presets/test5.json" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mapper/main_window.py" beforeDir="false" afterPath="$PROJECT_DIR$/src/mapper/main_window.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mapper/transform.py" beforeDir="false" afterPath="$PROJECT_DIR$/src/mapper/transform.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/mapper/video_player.py" beforeDir="false" afterPath="$PROJECT_DIR$/src/mapper/video_player.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -87,6 +95,42 @@
     "vue.rearranger.settings.migration": "true"
   }
 }]]></component>
+  <component name="RecentsManager">
+    <key name="MoveFile.RECENT_KEYS">
+      <recent name="$PROJECT_DIR$/presets" />
+    </key>
+  </component>
+  <component name="RunManager">
+    <configuration name="run_mapper" type="PythonConfigurationType" factoryName="Python" temporary="true" nameIsGenerated="true">
+      <module name="BeamerMapper" />
+      <option name="ENV_FILES" value="" />
+      <option name="INTERPRETER_OPTIONS" value="" />
+      <option name="PARENT_ENVS" value="true" />
+      <envs>
+        <env name="PYTHONUNBUFFERED" value="1" />
+      </envs>
+      <option name="SDK_HOME" value="" />
+      <option name="WORKING_DIRECTORY" value="$PROJECT_DIR$" />
+      <option name="IS_MODULE_SDK" value="true" />
+      <option name="ADD_CONTENT_ROOTS" value="true" />
+      <option name="ADD_SOURCE_ROOTS" value="true" />
+      <EXTENSION ID="PythonCoverageRunConfigurationExtension" runner="coverage.py" />
+      <option name="RUN_TOOL" value="" />
+      <option name="SCRIPT_NAME" value="$PROJECT_DIR$/run_mapper.py" />
+      <option name="PARAMETERS" value="" />
+      <option name="SHOW_COMMAND_LINE" value="false" />
+      <option name="EMULATE_TERMINAL" value="false" />
+      <option name="MODULE_MODE" value="false" />
+      <option name="REDIRECT_INPUT" value="false" />
+      <option name="INPUT_FILE" value="" />
+      <method v="2" />
+    </configuration>
+    <recent_temporary>
+      <list>
+        <item itemvalue="Python.run_mapper" />
+      </list>
+    </recent_temporary>
+  </component>
   <component name="SharedIndexes">
     <attachedChunks>
       <set>
@@ -268,7 +312,15 @@
       <option name="project" value="LOCAL" />
       <updated>1769631108421</updated>
     </task>
-    <option name="localTasksCounter" value="21" />
+    <task id="LOCAL-00021" summary="bugfixes">
+      <option name="closed" value="true" />
+      <created>1771144876504</created>
+      <option name="number" value="00021" />
+      <option name="presentableId" value="LOCAL-00021" />
+      <option name="project" value="LOCAL" />
+      <updated>1771144876504</updated>
+    </task>
+    <option name="localTasksCounter" value="22" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -314,7 +366,7 @@
   </component>
   <component name="com.intellij.coverage.CoverageDataManagerImpl">
     <SUITE FILE_PATH="coverage/BeamerMapper$canvas.coverage" NAME="canvas Coverage Results" MODIFIED="1770377698150" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$/src/mapper" />
-    <SUITE FILE_PATH="coverage/BeamerMapper$run_mapper.coverage" NAME="run_mapper Coverage Results" MODIFIED="1771144222552" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
+    <SUITE FILE_PATH="coverage/BeamerMapper$run_mapper.coverage" NAME="run_mapper Coverage Results" MODIFIED="1771147961334" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
     <SUITE FILE_PATH="coverage/BeamerMapper$transform.coverage" NAME="transform Coverage Results" MODIFIED="1771144208220" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$/src/mapper" />
     <SUITE FILE_PATH="coverage/BeamerMapper$test.coverage" NAME="test Coverage Results" MODIFIED="1769508265574" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />
     <SUITE FILE_PATH="coverage/BeamerMapper$mapping_software.coverage" NAME="mapping_software Coverage Results" MODIFIED="1771144802812" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$" />

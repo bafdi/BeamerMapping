@@ -17,17 +17,46 @@ Projection Mapping Software for mapping media onto arbitrary surfaces via projec
 
 ## Installation
 
+### Option 1: Download Pre-built Executable (Recommended)
+
+For most users, we recommend downloading the pre-built executables from GitHub:
+
+1. Go to the [Actions](../../actions) tab
+2. Click on the latest successful workflow run
+3. Download the artifact for your platform:
+   - **macOS**: `BeamerMapper-macos-app.zip` (contains `.app` bundle)
+   - **Windows**: `BeamerMapper-windows-exe.zip` (contains `.exe` file)
+
+**macOS**: Extract the zip and drag `BeamerMapper.app` to your Applications folder.  
+**Windows**: Extract the zip and run `BeamerMapper.exe`.
+
+### Option 2: Run from Source
+
+If you want to run from source or contribute to development:
+
 ```bash
 python -m venv venv
 source venv/bin/activate  # Windows: venv\Scripts\activate
-pip install PyQt6 opencv-python numpy mss
+pip install -r requirements.txt
 ```
 
 ## Usage
 
+### Running the Executable
+- **macOS**: Double-click `BeamerMapper.app`
+- **Windows**: Double-click `BeamerMapper.exe`
+
+### Running from Source
 ```bash
 python run_mapper.py
 ```
+
+## Building Executables
+
+Want to build the executables yourself? See [PACKAGING.md](PACKAGING.md) for detailed instructions on:
+- Building for macOS (.app via py2app)
+- Building for Windows (.exe via PyInstaller)
+- Using GitHub Actions for automated builds
 
 ## Keyboard Shortcuts
 

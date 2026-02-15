@@ -7,6 +7,7 @@ Diese Anleitung beschreibt, wie du `BeamerMapper` als `.app` (macOS) oder `.exe`
 | Plattform | Format | Methode | Zeitaufwand |
 |-----------|--------|---------|------------|
 | **macOS** | `.app` (Bundle) | `./package_mac.sh --py2app` | ~3-5 Min |
+| **macOS** | `.dmg` (Installer) | `./create_dmg.sh` (nach .app build) | ~1 Min |
 | **macOS** | Binary (onefile) | `./package_mac.sh` | ~2-3 Min |
 | **Windows** | `.exe` (onefile) | `package_win.bat` (lokal) | ~3-5 Min |
 | **Beide** | Automatisch | GitHub Actions | ~10-15 Min |
@@ -23,12 +24,25 @@ chmod +x package_mac.sh
 ./package_mac.sh --py2app
 ```
 
-**Ergebnis:** `dist/BeamerMapping.app`
+**Ergebnis:** `dist/BeamerMapper.app`
 
 **Optional:** Starte die App
 ```bash
 open dist/BeamerMapper.app
 ```
+
+### macOS: `.dmg` Installer erstellen
+
+Nach dem Erstellen der `.app`, kannst du optional ein DMG-Installer erstellen:
+
+```bash
+chmod +x create_dmg.sh
+./create_dmg.sh
+```
+
+**Ergebnis:** `BeamerMapper.dmg` (Installer-Image für macOS)
+
+Das DMG enthält die .app und ermöglicht es Benutzern, die App per Drag & Drop in ihren Applications-Ordner zu installieren.
 
 ### macOS: Binary (onefile) via PyInstaller
 

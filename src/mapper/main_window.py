@@ -1747,12 +1747,15 @@ class MainWindow(QMainWindow):
             window.showFullScreen()
 
     def _update_output_windows(self) -> None:
-        """Aktualisiere alle offenen Output-Fenster - optimiert."""
-        # Nur images updaten (die sich bei Video aendern), dann repaint
+        """Aktualisiere alle offenen Output-Fenster - optimiert mit dirty flag."""
+        # Nur images updaten wenn sie sich geaendert haben
         for output_id, window in self.output_windows.items():
             if window.isVisible():
-                window.images = self.images  # Direkt setzen ohne Methoden-Overhead
-                window.update()  # Nur repaint triggern
+                # Nur updaten wenn Images tatsaechlich geaendert wurden
+                if window.images is not self.images:
+                    window.images = self.images
+                    window._dirty = True
+                    window.update()
 
     def _update_live_sources_and_canvas(self) -> None:
         """Aktualisiere Live-Quellen (Kameras, Screens) - separater langsamer Timer."""

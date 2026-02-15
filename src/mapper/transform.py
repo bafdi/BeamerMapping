@@ -1,33 +1,27 @@
-"""Hochoptimierte Bild-Transformation mit Bilinearem Mesh-Warping (High-Res)."""
+"""Hochoptimierte Bild-Transformation mit Mesh-Warping fuer Kanten-Kontinuitaet."""
 
 from typing import List, Tuple, Optional, Dict
-from functools import lru_cache
 import cv2
 import numpy as np
 
-# Grid-Qualität: 20x20 = 400 Zellen = 800 Dreiecke.
-# Das macht die Verzerrung extrem weich ("Smooth") und minimiert Artefakte.
-GRID_ROWS = 20
-GRID_COLS = 20
+# Grid-Qualität: 8x8 ist der Sweetspot.
+# Hoch genug, dass das Bild im Inneren nicht "knickt".
+# Niedrig genug, dass die Performance flüssig bleibt (64 Zellen vs 400 früher).
+GRID_ROWS = 8
+GRID_COLS = 8
 
 def _get_bilinear_grid(points: List[List[float]], steps_x: int, steps_y: int) -> np.ndarray:
-    """
-    Berechnet Gitter-Punkte mittels bilinearer Interpolation.
-    Das garantiert, dass die Außenkanten linear (gleichmäßig) unterteilt werden.
-    """
-    # Eckpunkte (TL, TR, BR, BL)
+    """Berechnet Gitter-Punkte mittels bilinearer Interpolation."""
     p0 = np.array(points[0])
     p1 = np.array(points[1])
     p2 = np.array(points[2])
     p3 = np.array(points[3])
 
-    # Gitter-Koordinaten (0..1)
     ug = np.linspace(0, 1, steps_x + 1)
     vg = np.linspace(0, 1, steps_y + 1)
     u, v = np.meshgrid(ug, vg)
 
-    # Bilineare Formel (Vektorisiert)
-    # P = (1-u)(1-v)P0 + u(1-v)P1 + uvP2 + (1-u)vP3
+    # Vektorisierte Berechnung des Gitters
     term1 = ((1 - u) * (1 - v))[..., np.newaxis] * p0
     term2 = (u * (1 - v))[..., np.newaxis] * p1
     term3 = (u * v)[..., np.newaxis] * p2
@@ -43,17 +37,14 @@ def warp_triangle_affine_roi(
     out_h: int,
     result_buffer: np.ndarray
 ) -> None:
-    """
-    Warpt ein kleines Dreieck und blendet es in den Buffer.
-    """
-    # 1. Bounding Box (ROI) berechnen
-    # Wir runden großzügig, um Lücken (Black Lines) zu vermeiden
+    """Warpt ein kleines Dreieck (ROI-Optimiert)."""
+    # Bounding Box berechnen
     min_x = int(np.floor(np.min(dst_tri[:, 0])))
     min_y = int(np.floor(np.min(dst_tri[:, 1])))
     max_x = int(np.ceil(np.max(dst_tri[:, 0])))
     max_y = int(np.ceil(np.max(dst_tri[:, 1])))
 
-    # Clipping
+    # Clipping am Ausgabebild
     x = max(0, min_x)
     y = max(0, min_y)
     w = min(out_w, max_x) - x
@@ -62,15 +53,13 @@ def warp_triangle_affine_roi(
     if w <= 0 or h <= 0:
         return
 
-    # 2. Koordinaten relativ zur ROI verschieben
+    # Koordinaten relativ zur ROI verschieben
     dst_tri_shifted = np.array([[p[0]-x, p[1]-y] for p in dst_tri], dtype=np.float32)
 
-    # 3. Affine Matrix (Linear!)
-    # Affine Transformationen erzeugen KEINE perspektivische Verzerrung innerhalb des Dreiecks.
-    # Da das Dreieck winzig ist, wirkt das Gesamtbild glatt.
+    # Affine Matrix berechnen (Linear! Das garantiert, dass Kanten passen)
     M = cv2.getAffineTransform(src_tri, dst_tri_shifted)
 
-    # 4. Warping (nur ROI)
+    # Nur den kleinen Ausschnitt warpen
     warped_roi = cv2.warpAffine(
         img, M, (w, h),
         flags=cv2.INTER_LINEAR,
@@ -78,20 +67,18 @@ def warp_triangle_affine_roi(
         borderValue=(0, 0, 0)
     )
 
-    # 5. Maske (nur ROI)
+    # Dreiecks-Maske erstellen
     mask = np.zeros((h, w), dtype=np.uint8)
     cv2.fillConvexPoly(mask, dst_tri_shifted.astype(np.int32), 255)
 
-    # 6. Blenden
+    # In den Result-Buffer kopieren
     roi_target = result_buffer[y:y+h, x:x+w]
 
-    # Dimensions-Check
-    h_src, w_src = warped_roi.shape[:2]
-    h_dst, w_dst = roi_target.shape[:2]
-    h_c, w_c = min(h_src, h_dst), min(w_src, w_dst)
+    # Sicherheitscheck fuer Dimensionen
+    h_c, w_c = min(warped_roi.shape[0], roi_target.shape[0]), min(warped_roi.shape[1], roi_target.shape[1])
 
     if h_c > 0 and w_c > 0:
-        # Copy mit Maske - schnellste Methode
+        # Maskiertes Kopieren
         np.copyto(
             roi_target[:h_c, :w_c],
             warped_roi[:h_c, :w_c],
@@ -105,9 +92,8 @@ def warp_image(
     output_size: Tuple[int, int]
 ) -> Optional[np.ndarray]:
     """
-    Bilineares Mesh-Warping (20x20).
-    Erzeugt ein sehr feines Gitter. Berechnet Punkte bilinear (lineare Kanten!).
-    Warpt jedes Gitter-Segment als 2 affine Dreiecke.
+    Führt das Mesh-Warping durch.
+    Wir nutzen hier BEWUSST kein warpPerspective, damit die Kanten linear bleiben.
     """
     if image is None or len(source_points) != 4 or len(output_points) != 4:
         return None
@@ -115,14 +101,15 @@ def warp_image(
     out_w, out_h = output_size
     img_h, img_w = image.shape[:2]
 
+    # Ergebnis-Buffer
     result = np.zeros((out_h, out_w, 3), dtype=np.uint8)
 
     try:
-        # 1. Gitter berechnen (Bilinear)
+        # Gitter berechnen (8x8)
         src_grid = _get_bilinear_grid(source_points, GRID_COLS, GRID_ROWS)
         dst_grid = _get_bilinear_grid(output_points, GRID_COLS, GRID_ROWS)
 
-        # Skalieren
+        # Auf Bilddimensionen skalieren
         src_grid[..., 0] *= img_w
         src_grid[..., 1] *= img_h
         dst_grid[..., 0] *= out_w
@@ -131,23 +118,17 @@ def warp_image(
         src_grid = src_grid.astype(np.float32)
         dst_grid = dst_grid.astype(np.float32)
 
-        # 2. Über alle Zellen iterieren
+        # Jede Zelle als 2 Dreiecke warpen
         for r in range(GRID_ROWS):
             for c in range(GRID_COLS):
-                # Punkte der Zelle holen (TL, TR, BR, BL)
-                s_p0 = src_grid[r, c]
-                s_p1 = src_grid[r, c+1]
-                s_p2 = src_grid[r+1, c+1]
-                s_p3 = src_grid[r+1, c]
+                # Punkte holen
+                s_p0, s_p1 = src_grid[r, c], src_grid[r, c+1]
+                s_p2, s_p3 = src_grid[r+1, c+1], src_grid[r+1, c]
 
-                d_p0 = dst_grid[r, c]
-                d_p1 = dst_grid[r, c+1]
-                d_p2 = dst_grid[r+1, c+1]
-                d_p3 = dst_grid[r+1, c]
+                d_p0, d_p1 = dst_grid[r, c], dst_grid[r, c+1]
+                d_p2, d_p3 = dst_grid[r+1, c+1], dst_grid[r+1, c]
 
-                # Wir teilen das Viereck in 2 Dreiecke
-
-                # Dreieck 1: TL-TR-BL (0-1-3)
+                # Dreieck 1 (Oben-Links)
                 warp_triangle_affine_roi(
                     image,
                     np.array([s_p0, s_p1, s_p3]),
@@ -155,7 +136,7 @@ def warp_image(
                     out_w, out_h, result
                 )
 
-                # Dreieck 2: TR-BR-BL (1-2-3)
+                # Dreieck 2 (Unten-Rechts)
                 warp_triangle_affine_roi(
                     image,
                     np.array([s_p1, s_p2, s_p3]),
@@ -167,15 +148,7 @@ def warp_image(
 
     except Exception as e:
         print(f"Mesh Warp Error: {e}")
-        # Fallback
-        try:
-            src = np.array([[p[0]*img_w, p[1]*img_h] for p in source_points], dtype=np.float32)
-            dst = np.array([[p[0]*out_w, p[1]*out_h] for p in output_points], dtype=np.float32)
-            M = cv2.getPerspectiveTransform(src, dst)
-            return cv2.warpPerspective(image, M, (out_w, out_h))
-        except:
-            return None
-
+        return None
 
 def composite_polygons_fast(
     polygons_data: List[Tuple[np.ndarray, List[List[float]], List[List[float]]]],
@@ -197,14 +170,21 @@ def composite_polygons_fast(
     for image, source_points, output_points in polygons_data:
         if image is None: continue
 
+        # Mesh Warp aufrufen
         warped = warp_image(image, source_points, output_points, output_size)
 
         if warped is None:
             continue
 
-        # Simple Overlay Blending
-        mask_indices = np.any(warped > 0, axis=2)
-        result[mask_indices] = warped[mask_indices]
+        # Overlay Blending (Nicht-schwarze Pixel kopieren)
+        if warped.shape == result.shape:
+             mask = np.any(warped > 0, axis=2)
+             result[mask] = warped[mask]
+        else:
+             h_c, w_c = min(warped.shape[0], out_h), min(warped.shape[1], out_w)
+             if h_c > 0 and w_c > 0:
+                 mask = np.any(warped[:h_c, :w_c] > 0, axis=2)
+                 result[:h_c, :w_c][mask] = warped[:h_c, :w_c][mask]
 
     return result
 
@@ -217,17 +197,14 @@ def numpy_to_qimage(image: np.ndarray) -> Optional['QImage']:
     from PyQt6.QtGui import QImage
     if image is None: return None
     try:
-        if image.ndim == 3 and image.shape[2] == 3:
-            rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-            h, w, ch = rgb.shape
-            return QImage(rgb.data, w, h, ch * w, QImage.Format.Format_RGB888).copy()
-        elif image.ndim == 3 and image.shape[2] == 4:
-            rgba = cv2.cvtColor(image, cv2.COLOR_BGRA2RGBA)
-            h, w, ch = rgba.shape
-            return QImage(rgba.data, w, h, ch * w, QImage.Format.Format_RGBA8888).copy()
-        elif image.ndim == 2:
-             h, w = image.shape
-             return QImage(image.data, w, h, w, QImage.Format.Format_Grayscale8).copy()
+        h, w = image.shape[:2]
+        if image.ndim == 3:
+            if image.shape[2] == 3:
+                rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+                return QImage(rgb.data, w, h, 3 * w, QImage.Format.Format_RGB888).copy()
+            elif image.shape[2] == 4:
+                rgba = cv2.cvtColor(image, cv2.COLOR_BGRA2RGBA)
+                return QImage(rgba.data, w, h, 4 * w, QImage.Format.Format_RGBA8888).copy()
     except: pass
     return None
 

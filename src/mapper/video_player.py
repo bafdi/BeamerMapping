@@ -67,9 +67,16 @@ class VideoDecoder:
             self.capture = cv2.VideoCapture(self.path, cv2.CAP_FFMPEG)
             if not self.capture.isOpened():
                 self.capture = cv2.VideoCapture(self.path)
-                if not self.capture.isOpened():
-                    self.capture = None
-                    return False
+
+            if not self.capture or not self.capture.isOpened():
+                self.capture = None
+                return False
+
+            # BUFFERSIZE Erhoehen um "Frame nicht gebuffert" zu vermeiden
+            try:
+                self.capture.set(cv2.CAP_PROP_BUFFERSIZE, 3)
+            except:
+                pass
 
             self.width = int(self.capture.get(cv2.CAP_PROP_FRAME_WIDTH))
             self.height = int(self.capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
@@ -523,16 +530,15 @@ class VideoPlayerWidget(QFrame):
             # Differenz berechnen
             diff = video_pos_ms - audio_pos_ms
 
-            # OPTIMIERUNG: Strengere Logik für Sync
-            # Wenn Audio mehr als 100ms hinterher hinkt -> Seek Audio vorwärts
-            # Wenn Audio mehr als 100ms voraus ist -> Seek Audio rückwärts
-            if abs(diff) > 100:
-                # Wir vertrauen dem Video-Thread als "Master Clock"
+            # OPTIMIERUNG: Toleranterer Sync
+            # Wenn Audio mehr als 400ms (vorher 100ms) asynchron ist, greifen wir ein.
+            # Das verhindert Stottern bei kleinen CPU-Spikes.
+            if abs(diff) > 400:
                 player.setPosition(video_pos_ms)
 
             # Loop-Sync Check:
-            # Wenn Video gerade neu gestartet ist (Zeit < 200ms) aber Audio noch am Ende ist
-            if video_pos_ms < 200 and audio_pos_ms > decoder.duration * 1000 - 1000:
+            # Wenn Video gerade neu gestartet ist (Zeit < 300ms) aber Audio noch am Ende ist
+            if video_pos_ms < 300 and audio_pos_ms > (decoder.duration * 1000 - 1000):
                 player.setPosition(0)
 
     def _toggle_play(self) -> None:

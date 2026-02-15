@@ -308,7 +308,7 @@ class VideoPlayerWidget(QFrame):
         layout.setContentsMargins(6, 6, 6, 6)
         layout.setSpacing(4)
 
-        self.filename_label = QLabel("Kein Video")
+        self.filename_label = QLabel("No Video")
         self.filename_label.setStyleSheet("color: #888;")
         layout.addWidget(self.filename_label)
 
@@ -445,7 +445,7 @@ class VideoPlayerWidget(QFrame):
 
         if media_id is None or path is None:
             self._set_controls_enabled(False)
-            self.filename_label.setText("Kein Video")
+            self.filename_label.setText("No Video")
             self.duration_label.setText("00:00")
             self.time_label.setText("00:00")
             self.seek_slider.setValue(0)
@@ -453,7 +453,7 @@ class VideoPlayerWidget(QFrame):
 
         if not self.load_video(media_id, path):
             self._set_controls_enabled(False)
-            self.filename_label.setText("Fehler")
+            self.filename_label.setText("Error")
             return
 
         decoder = self.decoders[media_id]

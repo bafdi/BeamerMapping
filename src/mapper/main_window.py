@@ -3,10 +3,11 @@
 from typing import Optional, Dict, Callable
 from pathlib import Path
 import json
+import time
 import numpy as np
 
 from PyQt6.QtCore import Qt, QTimer, QEvent, QPoint, QMimeData, pyqtSignal, QSettings
-from PyQt6.QtGui import QAction, QKeySequence, QDrag, QMouseEvent, QDragEnterEvent, QDropEvent
+from PyQt6.QtGui import QAction, QKeySequence, QDrag, QMouseEvent, QDragEnterEvent, QDropEvent, QColor, QUndoStack
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QSplitter, QFrame, QLabel, QPushButton, QTreeWidget, QTreeWidgetItem,
@@ -22,6 +23,12 @@ SETTINGS_APP = "BeamerMapping"
 SETTINGS_LAST_PROJECT = "last_project_path"
 
 from .models import Project, OutputLayer, Polygon, MediaItem, MediaLayer
+from .undo_commands import (
+    PointsMoveCommand, MultiPointsMoveCommand,
+    PolygonPropertyCommand, MultiPolygonPropertyCommand,
+    AddPolygonCommand, RemovePolygonCommand,
+    ReorderPolygonCommand, MediaLayerMediaCommand,
+)
 
 
 class DraggableTreeWidget(QTreeWidget):
@@ -137,7 +144,7 @@ class CameraPreviewDialog(QDialog):
 
     def __init__(self, cameras: list, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Kamera auswählen")
+        self.setWindowTitle("Select Camera")
         self.setMinimumSize(640, 400)
 
         self.cameras = cameras  # [(idx, name), ...]
@@ -157,7 +164,7 @@ class CameraPreviewDialog(QDialog):
         layout = QVBoxLayout(self)
 
         # Info Label
-        info = QLabel("Klicke auf eine Kamera um sie auszuwählen:")
+        info = QLabel("Click on a camera to select it:")
         info.setStyleSheet("font-weight: bold; margin-bottom: 10px;")
         layout.addWidget(info)
 
@@ -194,7 +201,7 @@ class CameraPreviewDialog(QDialog):
             preview.setFixedSize(280, 180)
             preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
             preview.setStyleSheet("background: #1a1a1a; border-radius: 4px;")
-            preview.setText("Lade...")
+            preview.setText("Loading...")
             self.preview_labels[cam_idx] = preview
             frame_layout.addWidget(preview)
 
@@ -213,7 +220,7 @@ class CameraPreviewDialog(QDialog):
         btn_row = QHBoxLayout()
         btn_row.addStretch()
 
-        cancel_btn = QPushButton("Abbrechen")
+        cancel_btn = QPushButton("Cancel")
         cancel_btn.clicked.connect(self.reject)
         btn_row.addWidget(cancel_btn)
 
@@ -252,7 +259,7 @@ class CameraPreviewDialog(QDialog):
                 pixmap = QPixmap.fromImage(qimg)
                 self.preview_labels[cam_idx].setPixmap(pixmap)
             else:
-                self.preview_labels[cam_idx].setText("Kein Signal")
+                self.preview_labels[cam_idx].setText("No Signal")
 
     def _select_camera(self, cam_idx: int, cam_name: str) -> None:
         """Kamera ausgewaehlt."""
@@ -278,12 +285,13 @@ class CameraPreviewDialog(QDialog):
 
 from .canvas import PolygonCanvas
 from .output_window import OutputWindow
-from .transform import load_image
+from .transform import load_image, set_renderer_backend, get_renderer_backend
 from .test_patterns import TEST_PATTERNS, get_test_pattern
 from .live_sources import LiveSourceManager, CameraCapture
 from .video_player import VideoPlayerWidget
 from .queue_manager import QueueManager
 from .queue_grid import QueueGridWidget
+from .settings_dialog import SettingsDialog, SETTINGS_KEY_RENDERER, SETTINGS_KEY_SHOW_FPS, SETTINGS_KEY_FADE_DURATION
 
 
 class MainWindow(QMainWindow):
@@ -307,8 +315,23 @@ class MainWindow(QMainWindow):
         # Snapping State
         self._snapping_enabled = True
 
+        # Undo/Redo
+        self.undo_stack = QUndoStack(self)
+        self.undo_stack.setUndoLimit(100)
+
+        # Multi-Select
+        self.selected_polygons: list[Polygon] = []
+
         # Selection State: True wenn Media Layer selbst ausgewaehlt (nicht Polygon)
         self._media_layer_selected = False
+
+        # Freeze / Blackout State
+        self._freeze_active = False
+        self._blackout_active = False
+        self._fb_current_alpha: float = 0.0
+        self._fb_fade_start: Optional[float] = None  # time.monotonic()
+        self._fb_fade_from: float = 0.0
+        self._fb_fade_to: float = 0.0
 
         # UI erstellen
         self._create_menus()
@@ -332,6 +355,9 @@ class MainWindow(QMainWindow):
 
         # Settings
         self.settings = QSettings(SETTINGS_ORG, SETTINGS_APP)
+
+        # Einstellungen laden und anwenden
+        self._apply_settings()
 
         # Auto-Load letztes Projekt oder neues erstellen
         self._auto_load_or_create()
@@ -366,10 +392,26 @@ class MainWindow(QMainWindow):
 
         file_menu.addSeparator()
 
+        prefs_action = QAction("&Preferences...", self)
+        prefs_action.setShortcut(QKeySequence("Ctrl+,"))
+        prefs_action.triggered.connect(self._open_preferences)
+        file_menu.addAction(prefs_action)
+
+        file_menu.addSeparator()
+
         exit_action = QAction("E&xit", self)
         exit_action.setShortcut(QKeySequence("Alt+F4"))
         exit_action.triggered.connect(self.close)
         file_menu.addAction(exit_action)
+
+        # Edit Menu
+        edit_menu = menubar.addMenu("&Edit")
+        undo_action = self.undo_stack.createUndoAction(self, "&Undo")
+        undo_action.setShortcut(QKeySequence.StandardKey.Undo)
+        edit_menu.addAction(undo_action)
+        redo_action = self.undo_stack.createRedoAction(self, "&Redo")
+        redo_action.setShortcut(QKeySequence("Ctrl+Shift+Z"))
+        edit_menu.addAction(redo_action)
 
         # Output Menu
         output_menu = menubar.addMenu("&Output")
@@ -383,6 +425,22 @@ class MainWindow(QMainWindow):
         fullscreen_action.setShortcut(QKeySequence("F11"))
         fullscreen_action.triggered.connect(self._output_fullscreen)
         output_menu.addAction(fullscreen_action)
+
+        output_menu.addSeparator()
+
+        freeze_action = QAction("&Freeze Output", self)
+        freeze_action.setShortcut(QKeySequence("F"))
+        freeze_action.triggered.connect(
+            lambda: self._toggle_freeze(
+                instant=bool(QApplication.keyboardModifiers() & Qt.KeyboardModifier.ShiftModifier)))
+        output_menu.addAction(freeze_action)
+
+        blackout_action = QAction("B&lackout Output", self)
+        blackout_action.setShortcut(QKeySequence("B"))
+        blackout_action.triggered.connect(
+            lambda: self._toggle_blackout(
+                instant=bool(QApplication.keyboardModifiers() & Qt.KeyboardModifier.ShiftModifier)))
+        output_menu.addAction(blackout_action)
 
     def _create_ui(self) -> None:
         central = QWidget()
@@ -495,7 +553,7 @@ class MainWindow(QMainWindow):
         layout.addLayout(poly_btn_row2)
 
         # Polygon Layer-Zuweisung
-        layout.addWidget(QLabel("<small>Polygon zuweisen:</small>"))
+        layout.addWidget(QLabel("<small>Assign polygon:</small>"))
 
         # Media Layer Combo fuer Polygon
         self.poly_media_combo = QComboBox()
@@ -514,11 +572,11 @@ class MainWindow(QMainWindow):
         move_back_btn = QPushButton("To Back")
         move_back_btn.setFixedHeight(22)
         move_back_btn.clicked.connect(self._move_polygon_back)
-        move_back_btn.setToolTip("Polygon nach hinten (niedrigerer Index)")
+        move_back_btn.setToolTip("Move polygon back (lower index)")
         move_front_btn = QPushButton("To Front")
         move_front_btn.setFixedHeight(22)
         move_front_btn.clicked.connect(self._move_polygon_front)
-        move_front_btn.setToolTip("Polygon nach vorne (hoeherer Index)")
+        move_front_btn.setToolTip("Move polygon forward (higher index)")
         z_btn_row.addWidget(move_back_btn)
         z_btn_row.addWidget(move_front_btn)
         layout.addLayout(z_btn_row)
@@ -568,17 +626,69 @@ class MainWindow(QMainWindow):
         self._update_snap_button()
         toolbar.addWidget(self.snap_btn)
 
+        # Undo / Redo Buttons
+        self.undo_btn = QPushButton("\u21A9")  # ↩
+        self.undo_btn.setFixedSize(28, 24)
+        self.undo_btn.setToolTip("Undo (Ctrl+Z)")
+        self.undo_btn.clicked.connect(self.undo_stack.undo)
+        self.undo_btn.setEnabled(False)
+        toolbar.addWidget(self.undo_btn)
+
+        self.redo_btn = QPushButton("\u21AA")  # ↪
+        self.redo_btn.setFixedSize(28, 24)
+        self.redo_btn.setToolTip("Redo (Ctrl+Shift+Z)")
+        self.redo_btn.clicked.connect(self.undo_stack.redo)
+        self.redo_btn.setEnabled(False)
+        toolbar.addWidget(self.redo_btn)
+
+        # Buttons aktivieren/deaktivieren wenn Stack sich aendert
+        self.undo_stack.canUndoChanged.connect(self.undo_btn.setEnabled)
+        self.undo_stack.canRedoChanged.connect(self.redo_btn.setEnabled)
+
         toolbar.addStretch()
 
-        # Reset Buttons
-        reset_source_btn = QPushButton("Reset Src")
-        reset_source_btn.setFixedHeight(24)
-        reset_source_btn.clicked.connect(lambda: self._reset_points("source"))
-        reset_output_btn = QPushButton("Reset Out")
-        reset_output_btn.setFixedHeight(24)
-        reset_output_btn.clicked.connect(lambda: self._reset_points("output"))
-        toolbar.addWidget(reset_source_btn)
-        toolbar.addWidget(reset_output_btn)
+        # Freeze / Blackout Buttons - prominent, rechts aussen
+        self.freeze_btn = QPushButton(" FREEZE ")
+        self.freeze_btn.setCheckable(True)
+        self.freeze_btn.setFixedHeight(32)
+        self.freeze_btn.setToolTip("Freeze Output (F)")
+        self.freeze_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #2a3a3a;
+                color: #88dddd;
+                border: 2px solid #44aaaa;
+                border-radius: 4px;
+                font-weight: bold;
+                font-size: 13px;
+                padding: 0 12px;
+            }
+            QPushButton:hover { background-color: #3a4a4a; }
+        """)
+        self.freeze_btn.clicked.connect(
+            lambda: self._toggle_freeze(
+                instant=bool(QApplication.keyboardModifiers() & Qt.KeyboardModifier.ShiftModifier)))
+        toolbar.addWidget(self.freeze_btn)
+
+        self.blackout_btn = QPushButton(" BLACKOUT ")
+        self.blackout_btn.setCheckable(True)
+        self.blackout_btn.setFixedHeight(32)
+        self.blackout_btn.setToolTip("Blackout Output (B)")
+        self.blackout_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #3a2a2a;
+                color: #dd8888;
+                border: 2px solid #aa4444;
+                border-radius: 4px;
+                font-weight: bold;
+                font-size: 13px;
+                padding: 0 12px;
+            }
+            QPushButton:hover { background-color: #4a3a3a; }
+        """)
+        self.blackout_btn.clicked.connect(
+            lambda: self._toggle_blackout(
+                instant=bool(QApplication.keyboardModifiers() & Qt.KeyboardModifier.ShiftModifier)))
+        toolbar.addWidget(self.blackout_btn)
 
         layout.addLayout(toolbar)
 
@@ -592,12 +702,18 @@ class MainWindow(QMainWindow):
         self.source_canvas = PolygonCanvas(mode="source")
         self.source_canvas.points_changed.connect(self._on_points_changed)
         self.source_canvas.polygon_selected.connect(self._on_canvas_polygon_selected)
+        self.source_canvas.reset_points_requested.connect(lambda: self._reset_points("source"))
+        self.source_canvas.set_undo_stack(self.undo_stack)
+        self.source_canvas.set_refresh_callback(self._full_refresh)
         self.canvas_splitter.addWidget(self.source_canvas)
 
         # Output Canvas (Output-Ebene)
         self.output_canvas = PolygonCanvas(mode="output")
         self.output_canvas.points_changed.connect(self._on_points_changed)
         self.output_canvas.polygon_selected.connect(self._on_canvas_polygon_selected)
+        self.output_canvas.reset_points_requested.connect(lambda: self._reset_points("output"))
+        self.output_canvas.set_undo_stack(self.undo_stack)
+        self.output_canvas.set_refresh_callback(self._full_refresh)
         self.canvas_splitter.addWidget(self.output_canvas)
 
         self.canvas_splitter.setSizes([450, 450])
@@ -627,15 +743,15 @@ class MainWindow(QMainWindow):
         if self._snap_mode == 0:  # Ein
             self.source_canvas.set_snapping(True, 0.02)
             self.output_canvas.set_snapping(True, 0.02)
-            self.statusbar.showMessage("Snapping: Ein")
+            self.statusbar.showMessage("Snapping: On")
         elif self._snap_mode == 1:  # Leicht
             self.source_canvas.set_snapping(True, 0.008)
             self.output_canvas.set_snapping(True, 0.008)
-            self.statusbar.showMessage("Snapping: Leicht")
+            self.statusbar.showMessage("Snapping: Light")
         else:  # Aus
             self.source_canvas.set_snapping(False)
             self.output_canvas.set_snapping(False)
-            self.statusbar.showMessage("Snapping: Aus")
+            self.statusbar.showMessage("Snapping: Off")
         self._update_snap_button()
 
     def _update_snap_button(self) -> None:
@@ -650,19 +766,204 @@ class MainWindow(QMainWindow):
             self.snap_btn.setStyleSheet("")
             self.snap_btn.setText("Snap")
 
-    def _on_canvas_polygon_selected(self, polygon: Polygon) -> None:
-        """Handle Polygon-Auswahl aus dem Canvas."""
-        self.current_polygon = polygon
-        self._media_layer_selected = False
-        # Media Layer und Output Layer vom Polygon aktualisieren
-        if polygon.media_layer_id:
-            self.current_media_layer = self.project.get_media_layer_by_id(polygon.media_layer_id)
-        if polygon.output_layer_id:
-            self.current_output_layer = self.project.get_output_layer_by_id(polygon.output_layer_id)
+    def _toggle_freeze(self, instant: bool = False) -> None:
+        """Toggle Freeze - Output einfrieren/freigeben."""
+        if not self._freeze_active:
+            # Aktivierung: gegenseitige Exklusivitaet
+            if self._blackout_active:
+                self._blackout_active = False
+                for window in self.output_windows.values():
+                    if window.isVisible():
+                        window.set_blackout(False)
+            self._freeze_active = True
+            # Frame capturen auf allen sichtbaren Fenstern
+            for window in self.output_windows.values():
+                if window.isVisible():
+                    window.set_freeze(True)
+            self._start_fb_fade(1.0, instant)
+            self.statusbar.showMessage("Freeze aktiviert")
+        else:
+            # Deaktivierung: Fade 1→0, bei Completion cleanup
+            self._freeze_active = False
+            self._start_fb_fade(0.0, instant)
+            self.statusbar.showMessage("Freeze deaktiviert")
+        self._update_freeze_blackout_ui()
+
+    def _toggle_blackout(self, instant: bool = False) -> None:
+        """Toggle Blackout - Output schwarz schalten."""
+        if not self._blackout_active:
+            # Aktivierung: gegenseitige Exklusivitaet
+            if self._freeze_active:
+                self._freeze_active = False
+                for window in self.output_windows.values():
+                    if window.isVisible():
+                        window.set_freeze(False)
+            self._blackout_active = True
+            for window in self.output_windows.values():
+                if window.isVisible():
+                    window.set_blackout(True)
+            self._start_fb_fade(1.0, instant)
+            self.statusbar.showMessage("Blackout aktiviert")
+        else:
+            # Deaktivierung: Fade 1→0, bei Completion cleanup
+            self._blackout_active = False
+            self._start_fb_fade(0.0, instant)
+            self.statusbar.showMessage("Blackout deaktiviert")
+        self._update_freeze_blackout_ui()
+
+    def _start_fb_fade(self, target: float, instant: bool) -> None:
+        """Starte Freeze/Blackout Fade-Animation."""
+        duration = self.settings.value(SETTINGS_KEY_FADE_DURATION, 500, type=int)
+        if instant or duration <= 0:
+            self._fb_current_alpha = target
+            self._fb_fade_start = None
+            self._push_fb_alpha(target)
+            if target <= 0:
+                self._finalize_fb_release()
+        else:
+            self._fb_fade_from = self._fb_current_alpha
+            self._fb_fade_to = target
+            self._fb_fade_start = time.monotonic()
+
+    def _push_fb_alpha(self, alpha: float) -> None:
+        """Setze fb_alpha auf allen sichtbaren OutputWindows."""
+        for window in self.output_windows.values():
+            if window.isVisible():
+                window.set_fb_alpha(alpha)
+
+    def _finalize_fb_release(self) -> None:
+        """Cleanup nach Fade-to-0: frozen_frame/blackout Flags zuruecksetzen."""
+        for window in self.output_windows.values():
+            if window.isVisible():
+                if not self._freeze_active:
+                    window.set_freeze(False)
+                if not self._blackout_active:
+                    window.set_blackout(False)
+
+    def _update_freeze_blackout_fade(self) -> None:
+        """Update laufende Freeze/Blackout Fade-Animation (aufgerufen vom Transition-Timer)."""
+        if self._fb_fade_start is None:
+            return
+
+        duration = self.settings.value(SETTINGS_KEY_FADE_DURATION, 500, type=int)
+        if duration <= 0:
+            duration = 1  # Prevent division by zero
+
+        elapsed = time.monotonic() - self._fb_fade_start
+        progress = min(1.0, elapsed / (duration / 1000.0))
+
+        # Lineare Interpolation
+        alpha = self._fb_fade_from + (self._fb_fade_to - self._fb_fade_from) * progress
+        self._fb_current_alpha = alpha
+        self._push_fb_alpha(alpha)
+
+        if progress >= 1.0:
+            # Fade beendet
+            self._fb_fade_start = None
+            self._fb_current_alpha = self._fb_fade_to
+            if self._fb_fade_to <= 0:
+                self._finalize_fb_release()
+
+        self._update_freeze_blackout_ui()
+
+    def _update_freeze_blackout_ui(self) -> None:
+        """Aktualisiere Freeze/Blackout Button-Styles und Canvas-Border."""
+        self.freeze_btn.setChecked(self._freeze_active)
+        self.blackout_btn.setChecked(self._blackout_active)
+
+        if self._freeze_active:
+            self.freeze_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #00aaaa;
+                    color: #ffffff;
+                    border: 2px solid #00ffff;
+                    border-radius: 4px;
+                    font-weight: bold;
+                    font-size: 13px;
+                    padding: 0 12px;
+                }
+            """)
+        else:
+            self.freeze_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #2a3a3a;
+                    color: #88dddd;
+                    border: 2px solid #44aaaa;
+                    border-radius: 4px;
+                    font-weight: bold;
+                    font-size: 13px;
+                    padding: 0 12px;
+                }
+                QPushButton:hover { background-color: #3a4a4a; }
+            """)
+
+        if self._blackout_active:
+            self.blackout_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #aa2222;
+                    color: #ffffff;
+                    border: 2px solid #ff4444;
+                    border-radius: 4px;
+                    font-weight: bold;
+                    font-size: 13px;
+                    padding: 0 12px;
+                }
+            """)
+        else:
+            self.blackout_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #3a2a2a;
+                    color: #dd8888;
+                    border: 2px solid #aa4444;
+                    border-radius: 4px;
+                    font-weight: bold;
+                    font-size: 13px;
+                    padding: 0 12px;
+                }
+                QPushButton:hover { background-color: #4a3a3a; }
+            """)
+
+        # Canvas-Border aktualisieren (nur Output-Canvas) - Alpha folgt Fade
+        border_alpha = self._fb_current_alpha
+        if self._freeze_active or (border_alpha > 0 and not self._blackout_active):
+            self.output_canvas.set_border_highlight(QColor(0, 255, 255), border_alpha)
+        elif self._blackout_active or (border_alpha > 0):
+            self.output_canvas.set_border_highlight(QColor(255, 0, 0), border_alpha)
+        else:
+            self.output_canvas.set_border_highlight(None)
+
+    def _full_refresh(self) -> None:
+        """Refresh alles - wird von Undo-Commands gerufen."""
+        self._update_trees()
         self._update_canvas()
         self._update_polygon_combos()
-        self._select_polygon_in_trees(polygon)
-        self.statusbar.showMessage(f"Polygon '{polygon.name}' ausgewaehlt")
+        self._update_output_windows()
+
+    def _on_canvas_polygon_selected(self, polygon: Polygon, modifiers: int = 0) -> None:
+        """Handle Polygon-Auswahl aus dem Canvas (mit Ctrl-Multi-Select)."""
+        ctrl = bool(modifiers & Qt.KeyboardModifier.ShiftModifier.value)
+        if ctrl:
+            if polygon in self.selected_polygons:
+                self.selected_polygons.remove(polygon)
+                self.current_polygon = self.selected_polygons[-1] if self.selected_polygons else None
+            else:
+                self.selected_polygons.append(polygon)
+                self.current_polygon = polygon
+        else:
+            self.selected_polygons = [polygon]
+            self.current_polygon = polygon
+
+        self._media_layer_selected = False
+        if self.current_polygon:
+            if self.current_polygon.media_layer_id:
+                self.current_media_layer = self.project.get_media_layer_by_id(self.current_polygon.media_layer_id)
+            if self.current_polygon.output_layer_id:
+                self.current_output_layer = self.project.get_output_layer_by_id(self.current_polygon.output_layer_id)
+        self._update_canvas()
+        self._update_polygon_combos()
+        self._sync_tree_selection()
+        if self.current_polygon:
+            self.statusbar.showMessage(f"Polygon '{self.current_polygon.name}' selected ({len(self.selected_polygons)} total)")
 
     def _move_polygon_back(self) -> None:
         """Verschiebe Polygon nach hinten (niedrigerer Index)."""
@@ -672,12 +973,11 @@ class MainWindow(QMainWindow):
         idx = self.project.polygons.index(self.current_polygon) if self.current_polygon in self.project.polygons else -1
 
         if idx > 0:
-            polygons = self.project.polygons
-            polygons[idx], polygons[idx - 1] = polygons[idx - 1], polygons[idx]
-            self._update_trees()
-            self._update_canvas()
-            self._update_output_windows()
-            self.statusbar.showMessage(f"'{self.current_polygon.name}' nach hinten verschoben")
+            cmd = ReorderPolygonCommand(
+                self.project, idx, idx - 1,
+                self._full_refresh, f"Move '{self.current_polygon.name}' back")
+            self.undo_stack.push(cmd)
+            self.statusbar.showMessage(f"'{self.current_polygon.name}' moved back")
 
     def _move_polygon_front(self) -> None:
         """Verschiebe Polygon nach vorne (hoeherer Index)."""
@@ -688,17 +988,18 @@ class MainWindow(QMainWindow):
         idx = polygons.index(self.current_polygon) if self.current_polygon in polygons else -1
 
         if idx >= 0 and idx < len(polygons) - 1:
-            polygons[idx], polygons[idx + 1] = polygons[idx + 1], polygons[idx]
-            self._update_trees()
-            self._update_canvas()
-            self._update_output_windows()
-            self.statusbar.showMessage(f"'{self.current_polygon.name}' nach vorne verschoben")
+            cmd = ReorderPolygonCommand(
+                self.project, idx, idx + 1,
+                self._full_refresh, f"Move '{self.current_polygon.name}' forward")
+            self.undo_stack.push(cmd)
+            self.statusbar.showMessage(f"'{self.current_polygon.name}' moved forward")
 
     def _create_queues_panel(self) -> QWidget:
         """Erstelle Queues-Panel mit QueueGridWidget."""
         # QueueManager erstellen (VideoPlayer muss bereits existieren)
         self.queue_manager = QueueManager(self.project, self.video_player)
         self.queue_manager.set_on_transition_update(self._on_transition_update)
+        self.queue_manager.set_on_pre_transition(self._on_pre_transition)
 
         # QueueGridWidget erstellen
         self.queue_grid = QueueGridWidget(self.queue_manager)
@@ -762,14 +1063,57 @@ class MainWindow(QMainWindow):
         self._update_output_windows()
 
     def _update_transition(self) -> None:
-        """Update Queue-Transitions (60 FPS Timer)."""
-        if hasattr(self, 'queue_manager') and self.queue_manager.update_transition():
-            # Transition aktiv - UI updaten
+        """Update Queue-Transitions und Freeze/Blackout Fades (60 FPS Timer)."""
+        self._update_freeze_blackout_fade()
+
+        if not hasattr(self, 'queue_manager'):
+            return
+
+        was_transitioning = self.queue_manager.is_transitioning()
+        still_active = self.queue_manager.update_transition()
+
+        if was_transitioning and not still_active:
+            # Transition gerade beendet -> Snapshots freigeben, Fortschrittsbalken zuruecksetzen
+            for window in self.output_windows.values():
+                if window.isVisible():
+                    window.set_crossfade_alphas(0.0, 1.0)
+            self.output_canvas.set_crossfade_alphas(0.0, 1.0)
+            if hasattr(self, 'queue_grid'):
+                self.queue_grid.set_transition_progress(0.0)
             self._update_canvas()
             self._update_output_windows()
 
+    def _on_pre_transition(self) -> None:
+        """Callback VOR dem State-Wechsel - Snapshot fuer Crossfade erstellen.
+
+        Setzt sofort initiale Alphas (from=1.0, to=0.0), damit der erste
+        Repaint nach _apply_state_instant() den Snapshot zeigt statt den
+        neuen State aufblitzen zu lassen.
+        """
+        for window in self.output_windows.values():
+            if window.isVisible():
+                window.capture_crossfade_snapshot()
+                window.set_crossfade_alphas(1.0, 0.0)
+        self.output_canvas.capture_crossfade_snapshot()
+        self.output_canvas.set_crossfade_alphas(1.0, 0.0)
+
     def _on_transition_update(self) -> None:
         """Callback vom QueueManager waehrend Transitions."""
+        progress = self.queue_manager.transition_progress
+        transition = self.queue_manager._active_transition
+
+        if transition:
+            from .queue_manager import QueueManager
+            from_a, to_a = QueueManager.compute_blend_alphas(progress, transition.overlap)
+
+            for window in self.output_windows.values():
+                if window.isVisible():
+                    window.set_crossfade_alphas(from_a, to_a)
+            self.output_canvas.set_crossfade_alphas(from_a, to_a)
+
+            if hasattr(self, 'queue_grid'):
+                self.queue_grid.set_transition_progress(progress)
+
         self._update_canvas()
         self._update_output_windows()
 
@@ -777,7 +1121,7 @@ class MainWindow(QMainWindow):
         """Handle Queue-Abruf."""
         queue = self.project.get_queue_by_id(queue_id)
         if queue:
-            self.statusbar.showMessage(f"Queue '{queue.name}' abgerufen")
+            self.statusbar.showMessage(f"Queue '{queue.name}' recalled")
             self._update_trees()
             self._update_canvas()
             self._update_output_windows()
@@ -858,11 +1202,11 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.media_list)
 
         # Delete Media Button
-        delete_media_btn = QPushButton("Ausgewähltes Medium löschen")
+        delete_media_btn = QPushButton("Delete selected media")
         delete_media_btn.clicked.connect(self._delete_selected_media)
         layout.addWidget(delete_media_btn)
 
-        layout.addWidget(QLabel("<small>Doppelklick: Medium zuweisen | Delete: Löschen</small>"))
+        layout.addWidget(QLabel("<small>Double-click: assign media | Delete: remove</small>"))
 
         # === VIDEO PLAYER ===
         layout.addWidget(QLabel("<b>VIDEO PLAYER</b>"))
@@ -876,7 +1220,7 @@ class MainWindow(QMainWindow):
     def _create_statusbar(self) -> None:
         self.statusbar = QStatusBar()
         self.setStatusBar(self.statusbar)
-        self.statusbar.showMessage("Bereit")
+        self.statusbar.showMessage("Ready")
 
     def _update_monitor_combo(self) -> None:
         """Aktualisiere Monitor-Auswahl."""
@@ -897,13 +1241,15 @@ class MainWindow(QMainWindow):
         polygon = self.project.get_polygon_by_id(polygon_id)
         layer = self.project.get_media_layer_by_id(layer_id)
         if polygon and layer and polygon.media_layer_id != layer_id:
-            polygon.media_layer_id = layer_id
+            old_id = polygon.media_layer_id
+            cmd = PolygonPropertyCommand(
+                polygon, "media_layer_id", old_id, layer_id,
+                self._full_refresh, f"Drop polygon to media layer")
+            self.undo_stack.push(cmd)
             self.current_polygon = polygon
+            self.selected_polygons = [polygon]
             self.current_media_layer = layer
             self._media_layer_selected = False
-            self._update_trees()
-            self._update_canvas()
-            self._update_output_windows()
             self.statusbar.showMessage(f"Polygon '{polygon.name}' -> Media Layer '{layer.name}'")
 
     def _on_polygon_dropped_to_output(self, polygon_id: str, layer_id: str) -> None:
@@ -911,42 +1257,54 @@ class MainWindow(QMainWindow):
         polygon = self.project.get_polygon_by_id(polygon_id)
         layer = self.project.get_output_layer_by_id(layer_id)
         if polygon and layer and polygon.output_layer_id != layer_id:
-            polygon.output_layer_id = layer_id
+            old_id = polygon.output_layer_id
+            cmd = PolygonPropertyCommand(
+                polygon, "output_layer_id", old_id, layer_id,
+                self._full_refresh, f"Drop polygon to output layer")
+            self.undo_stack.push(cmd)
             self.current_polygon = polygon
+            self.selected_polygons = [polygon]
             self.current_output_layer = layer
             self._media_layer_selected = False
-            self._update_trees()
-            self._update_canvas()
-            self._update_output_windows()
             self.statusbar.showMessage(f"Polygon '{polygon.name}' -> Output Layer '{layer.name}'")
 
     def _select_polygon_in_trees(self, polygon: Polygon) -> None:
-        """Selektiere ein Polygon in beiden Trees ohne sie neu aufzubauen."""
-        # Media Tree durchsuchen
+        """Selektiere ein Polygon in beiden Trees (Legacy)."""
+        self._sync_tree_selection()
+
+    def _sync_tree_selection(self) -> None:
+        """Highlighte alle selected_polygons in beiden Trees."""
+        selected_ids = set(p.id for p in self.selected_polygons)
+
+        self.media_tree.blockSignals(True)
         for i in range(self.media_tree.topLevelItemCount()):
             ml_item = self.media_tree.topLevelItem(i)
             ml_item.setSelected(False)
             for j in range(ml_item.childCount()):
                 child = ml_item.child(j)
                 data = child.data(0, Qt.ItemDataRole.UserRole)
-                if data and data[0] == "polygon" and data[1] == polygon.id:
+                if data and data[0] == "polygon" and data[1] in selected_ids:
                     child.setSelected(True)
-                    self.media_tree.scrollToItem(child)
+                    if data[1] == (self.current_polygon.id if self.current_polygon else None):
+                        self.media_tree.scrollToItem(child)
                 else:
                     child.setSelected(False)
+        self.media_tree.blockSignals(False)
 
-        # Output Tree durchsuchen
+        self.output_tree.blockSignals(True)
         for i in range(self.output_tree.topLevelItemCount()):
             ol_item = self.output_tree.topLevelItem(i)
             ol_item.setSelected(False)
             for j in range(ol_item.childCount()):
                 child = ol_item.child(j)
                 data = child.data(0, Qt.ItemDataRole.UserRole)
-                if data and data[0] == "polygon" and data[1] == polygon.id:
+                if data and data[0] == "polygon" and data[1] in selected_ids:
                     child.setSelected(True)
-                    self.output_tree.scrollToItem(child)
+                    if data[1] == (self.current_polygon.id if self.current_polygon else None):
+                        self.output_tree.scrollToItem(child)
                 else:
                     child.setSelected(False)
+        self.output_tree.blockSignals(False)
 
     def _update_media_tree(self) -> None:
         """Aktualisiere den Media Layers Baum."""
@@ -1052,14 +1410,27 @@ class MainWindow(QMainWindow):
         if data[0] == "media_layer":
             layer_id = data[1]
             self.current_media_layer = self.project.get_media_layer_by_id(layer_id)
-            self._media_layer_selected = True  # Media Layer selbst ausgewaehlt
-            # Kein Polygon auswaehlen - nur der Layer
+            self._media_layer_selected = True
             self.current_polygon = None
+            self.selected_polygons.clear()
 
         elif data[0] == "polygon":
             polygon_id = data[1]
-            self._media_layer_selected = False  # Polygon ausgewaehlt, nicht Layer
-            self.current_polygon = self.project.get_polygon_by_id(polygon_id)
+            polygon = self.project.get_polygon_by_id(polygon_id)
+            if not polygon:
+                return
+            self._media_layer_selected = False
+            shift = bool(QApplication.keyboardModifiers() & Qt.KeyboardModifier.ShiftModifier)
+            if shift:
+                if polygon in self.selected_polygons:
+                    self.selected_polygons.remove(polygon)
+                    self.current_polygon = self.selected_polygons[-1] if self.selected_polygons else None
+                else:
+                    self.selected_polygons.append(polygon)
+                    self.current_polygon = polygon
+            else:
+                self.selected_polygons = [polygon]
+                self.current_polygon = polygon
             if self.current_polygon:
                 if self.current_polygon.media_layer_id:
                     self.current_media_layer = self.project.get_media_layer_by_id(
@@ -1071,7 +1442,7 @@ class MainWindow(QMainWindow):
                     )
 
         self._update_canvas()
-        self._update_polygon_combos()  # Nur Combos, nicht Trees!
+        self._update_polygon_combos()
         self._update_video_player()
 
     def _on_media_tree_double_clicked(self, item: QTreeWidgetItem, column: int) -> None:
@@ -1088,8 +1459,8 @@ class MainWindow(QMainWindow):
                 self._update_trees()
                 self._update_canvas()
                 self._update_output_windows()
-                status = "sichtbar" if layer.visible else "versteckt"
-                self.statusbar.showMessage(f"Media Layer '{layer.name}' ist nun {status}")
+                status = "visible" if layer.visible else "hidden"
+                self.statusbar.showMessage(f"Media Layer '{layer.name}' is now {status}")
 
     def _on_output_tree_clicked(self, item: QTreeWidgetItem, column: int) -> None:
         """Handle Klick auf Output Tree Item."""
@@ -1097,19 +1468,31 @@ class MainWindow(QMainWindow):
         if not data:
             return
 
-        # Output Tree Klick - Media Layer Selektion zuruecksetzen
         self._media_layer_selected = False
 
         if data[0] == "output_layer":
             layer_id = data[1]
             self.current_output_layer = self.project.get_output_layer_by_id(layer_id)
-            # Kein Polygon auswaehlen - nur der Layer
             self.current_polygon = None
+            self.selected_polygons.clear()
             self._update_monitor_selection()
 
         elif data[0] == "polygon":
             polygon_id = data[1]
-            self.current_polygon = self.project.get_polygon_by_id(polygon_id)
+            polygon = self.project.get_polygon_by_id(polygon_id)
+            if not polygon:
+                return
+            shift = bool(QApplication.keyboardModifiers() & Qt.KeyboardModifier.ShiftModifier)
+            if shift:
+                if polygon in self.selected_polygons:
+                    self.selected_polygons.remove(polygon)
+                    self.current_polygon = self.selected_polygons[-1] if self.selected_polygons else None
+                else:
+                    self.selected_polygons.append(polygon)
+                    self.current_polygon = polygon
+            else:
+                self.selected_polygons = [polygon]
+                self.current_polygon = polygon
             if self.current_polygon:
                 if self.current_polygon.media_layer_id:
                     self.current_media_layer = self.project.get_media_layer_by_id(
@@ -1193,8 +1576,10 @@ class MainWindow(QMainWindow):
 
         self.source_canvas.set_all_polygons(source_polygons)
         self.source_canvas.set_all_data(self.project, self.images)
+        self.source_canvas.set_selected_polygons(self.selected_polygons)
         self.output_canvas.set_all_polygons(output_polygons)
         self.output_canvas.set_all_data(self.project, self.images)
+        self.output_canvas.set_selected_polygons(self.selected_polygons)
 
     def _update_monitor_selection(self) -> None:
         """Aktualisiere Monitor-Auswahl basierend auf aktuellem Output Layer."""
@@ -1253,11 +1638,12 @@ class MainWindow(QMainWindow):
 
         new_media_layer_id = self.poly_media_combo.itemData(index)
         if new_media_layer_id and new_media_layer_id != self.current_polygon.media_layer_id:
-            self.current_polygon.media_layer_id = new_media_layer_id
+            old_id = self.current_polygon.media_layer_id
+            cmd = PolygonPropertyCommand(
+                self.current_polygon, "media_layer_id", old_id, new_media_layer_id,
+                self._full_refresh, f"Assign media layer")
+            self.undo_stack.push(cmd)
             self.current_media_layer = self.project.get_media_layer_by_id(new_media_layer_id)
-            self._update_trees()
-            self._update_canvas()
-            self._update_output_windows()
             self.statusbar.showMessage(
                 f"Polygon '{self.current_polygon.name}' -> {self.current_media_layer.name}"
             )
@@ -1269,11 +1655,12 @@ class MainWindow(QMainWindow):
 
         new_output_layer_id = self.poly_output_combo.itemData(index)
         if new_output_layer_id and new_output_layer_id != self.current_polygon.output_layer_id:
-            self.current_polygon.output_layer_id = new_output_layer_id
+            old_id = self.current_polygon.output_layer_id
+            cmd = PolygonPropertyCommand(
+                self.current_polygon, "output_layer_id", old_id, new_output_layer_id,
+                self._full_refresh, f"Assign output layer")
+            self.undo_stack.push(cmd)
             self.current_output_layer = self.project.get_output_layer_by_id(new_output_layer_id)
-            self._update_trees()
-            self._update_canvas()
-            self._update_output_windows()
             self.statusbar.showMessage(
                 f"Polygon '{self.current_polygon.name}' -> {self.current_output_layer.name}"
             )
@@ -1297,11 +1684,15 @@ class MainWindow(QMainWindow):
 
         default = [[0.1, 0.1], [0.9, 0.1], [0.9, 0.9], [0.1, 0.9]]
         if mode == "source":
-            self.current_polygon.source_points = [p.copy() for p in default]
+            old_pts = self.current_polygon.snapshot_source()
         else:
-            self.current_polygon.output_points = [p.copy() for p in default]
+            old_pts = self.current_polygon.snapshot_output()
 
-        self._update_canvas()
+        cmd = PointsMoveCommand(
+            self.current_polygon, mode,
+            old_pts, [p.copy() for p in default],
+            self._full_refresh, "Reset points")
+        self.undo_stack.push(cmd)
 
     # === MEDIA LAYER MANAGEMENT ===
 
@@ -1321,11 +1712,12 @@ class MainWindow(QMainWindow):
                 output_layer_id=self.project.output_layers[0].id
             )
             self.current_polygon = poly
+            self.selected_polygons = [poly]
             self.current_output_layer = self.project.output_layers[0]
 
         self._update_trees()
         self._update_canvas()
-        self.statusbar.showMessage(f"Media Layer '{layer.name}' erstellt")
+        self.statusbar.showMessage(f"Media Layer '{layer.name}' created")
 
     # === OUTPUT LAYER MANAGEMENT ===
 
@@ -1337,7 +1729,7 @@ class MainWindow(QMainWindow):
         self.current_output_layer = layer
         self._update_trees()
         self._update_monitor_selection()
-        self.statusbar.showMessage(f"Output Layer '{layer.name}' erstellt")
+        self.statusbar.showMessage(f"Output Layer '{layer.name}' created")
 
     # === POLYGON MANAGEMENT ===
 
@@ -1367,15 +1759,18 @@ class MainWindow(QMainWindow):
             output_layer_id = self.project.output_layers[0].id
             self.current_output_layer = self.project.output_layers[0]
 
-        poly = self.project.add_polygon(
+        poly = Polygon(
+            name=f"Polygon {len(self.project.polygons) + 1}",
             media_layer_id=media_layer_id,
             output_layer_id=output_layer_id
         )
+        cmd = AddPolygonCommand(self.project, poly, self._full_refresh, f"Add polygon '{poly.name}'")
+        self.undo_stack.push(cmd)
         self.current_polygon = poly
+        self.selected_polygons = [poly]
 
-        self._update_trees()
-        self._update_canvas()
-        self.statusbar.showMessage(f"Polygon '{poly.name}' erstellt")
+        self._sync_tree_selection()
+        self.statusbar.showMessage(f"Polygon '{poly.name}' created")
 
     def _delete_selected(self) -> None:
         """Loesche ausgewaehltes Element (Polygon, Media Layer oder Output Layer)."""
@@ -1385,43 +1780,64 @@ class MainWindow(QMainWindow):
             self.project.remove_media_layer(self.current_media_layer)
             self.current_media_layer = None
             self.current_polygon = None
-            # Naechsten Media Layer auswaehlen
+            self.selected_polygons.clear()
             if self.project.media_layers:
                 self.current_media_layer = self.project.media_layers[0]
             self._update_trees()
             self._update_canvas()
-            self.statusbar.showMessage(f"Media Layer '{layer_name}' geloescht")
+            self.statusbar.showMessage(f"Media Layer '{layer_name}' deleted")
             return
 
-        # Fall 2: Polygon ist ausgewaehlt
+        # Fall 2: Multi-Select Polygone loeschen
+        if len(self.selected_polygons) > 1:
+            self.undo_stack.beginMacro("Delete polygons")
+            for poly in list(self.selected_polygons):
+                if poly in self.project.polygons:
+                    idx = self.project.polygons.index(poly)
+                    self.undo_stack.push(RemovePolygonCommand(
+                        self.project, poly, idx, self._full_refresh))
+            self.undo_stack.endMacro()
+            self.selected_polygons.clear()
+            self.current_polygon = self.project.polygons[0] if self.project.polygons else None
+            if self.current_polygon:
+                self.selected_polygons = [self.current_polygon]
+            self._full_refresh()
+            self.statusbar.showMessage("Polygons deleted")
+            return
+
+        # Fall 3: Einzelnes Polygon ist ausgewaehlt
         if self.current_polygon:
             poly_name = self.current_polygon.name
-            self.project.remove_polygon(self.current_polygon)
-            # Naechstes Polygon auswaehlen
+            idx = self.project.polygons.index(self.current_polygon) if self.current_polygon in self.project.polygons else -1
+            if idx >= 0:
+                cmd = RemovePolygonCommand(
+                    self.project, self.current_polygon, idx,
+                    self._full_refresh, f"Delete polygon '{poly_name}'")
+                self.undo_stack.push(cmd)
             if self.project.polygons:
                 self.current_polygon = self.project.polygons[0]
+                self.selected_polygons = [self.current_polygon]
             else:
                 self.current_polygon = None
-            self._update_trees()
-            self._update_canvas()
-            self.statusbar.showMessage(f"Polygon '{poly_name}' geloescht")
+                self.selected_polygons.clear()
+            self._sync_tree_selection()
+            self.statusbar.showMessage(f"Polygon '{poly_name}' deleted")
             return
 
-        # Fall 3: Output Layer ausgewaehlt (ueber Output Tree)
-        # Wird nur geloescht wenn kein Polygon ausgewaehlt
+        # Fall 4: Output Layer ausgewaehlt (ueber Output Tree)
         if self.current_output_layer and len(self.project.output_layers) > 1:
             layer_name = self.current_output_layer.name
             self.project.remove_output_layer(self.current_output_layer)
             self.current_output_layer = self.project.output_layers[0] if self.project.output_layers else None
             self._update_trees()
             self._update_canvas()
-            self.statusbar.showMessage(f"Output Layer '{layer_name}' geloescht")
+            self.statusbar.showMessage(f"Output Layer '{layer_name}' deleted")
 
     def _rename_selected(self) -> None:
         """Benenne ausgewaehltes Element um."""
         if self.current_polygon:
             name, ok = QInputDialog.getText(
-                self, "Umbenennen", "Neuer Name:",
+                self, "Rename", "New name:",
                 text=self.current_polygon.name
             )
             if ok and name:
@@ -1442,10 +1858,10 @@ class MainWindow(QMainWindow):
             if image is not None:
                 self.images[media.id] = image
                 self._update_media_list()
-                self.statusbar.showMessage(f"Importiert: {media.name}")
+                self.statusbar.showMessage(f"Imported: {media.name}")
             else:
                 self.project.media.remove(media)
-                QMessageBox.warning(self, "Fehler", f"Konnte Bild nicht laden: {filepath}")
+                QMessageBox.warning(self, "Error", f"Could not load image: {filepath}")
 
     def _import_video(self) -> None:
         """Importiere ein Video."""
@@ -1464,10 +1880,10 @@ class MainWindow(QMainWindow):
             if ret:
                 self.images[media.id] = frame
                 self._update_media_list()
-                self.statusbar.showMessage(f"Video importiert: {media.name}")
+                self.statusbar.showMessage(f"Video imported: {media.name}")
             else:
                 self.project.media.remove(media)
-                QMessageBox.warning(self, "Fehler", f"Konnte Video nicht laden: {filepath}")
+                QMessageBox.warning(self, "Error", f"Could not load video: {filepath}")
 
     def _add_screen_capture(self) -> None:
         """Fuege Screen Capture hinzu."""
@@ -1476,7 +1892,7 @@ class MainWindow(QMainWindow):
                  for i, s in enumerate(screens)]
 
         item, ok = QInputDialog.getItem(
-            self, "Screen Capture", "Monitor auswaehlen:", items, 0, False
+            self, "Screen Capture", "Select monitor:", items, 0, False
         )
         if ok and item:
             idx = items.index(item)
@@ -1493,13 +1909,13 @@ class MainWindow(QMainWindow):
                 self.images[media.id] = frame
 
             self._update_media_list()
-            self.statusbar.showMessage(f"Screen Capture hinzugefuegt: {media.name}")
+            self.statusbar.showMessage(f"Screen capture added: {media.name}")
 
     def _add_camera(self) -> None:
         """Fuege Kamera hinzu mit Live-Preview Dialog."""
         cameras = CameraCapture.list_cameras()
         if not cameras:
-            QMessageBox.warning(self, "Fehler", "Keine Kameras gefunden!")
+            QMessageBox.warning(self, "Error", "No cameras found!")
             return
 
         # Preview Dialog oeffnen
@@ -1520,7 +1936,7 @@ class MainWindow(QMainWindow):
                 self.images[media.id] = frame
 
             self._update_media_list()
-            self.statusbar.showMessage(f"Kamera hinzugefuegt: {media.name}")
+            self.statusbar.showMessage(f"Camera added: {media.name}")
 
     def _add_test_pattern(self, pattern_name: str) -> None:
         """Fuege Test-Pattern hinzu."""
@@ -1536,13 +1952,13 @@ class MainWindow(QMainWindow):
         self.images[media.id] = pattern
 
         self._update_media_list()
-        self.statusbar.showMessage(f"Test-Pattern hinzugefuegt: {pattern_name}")
+        self.statusbar.showMessage(f"Test pattern added: {pattern_name}")
 
     def _delete_selected_media(self) -> None:
         """Loesche das ausgewaehlte Medium aus dem Pool."""
         current_item = self.media_list.currentItem()
         if not current_item:
-            QMessageBox.information(self, "Kein Medium", "Bitte waehle ein Medium zum Loeschen aus.")
+            QMessageBox.information(self, "No Media", "Please select a media item to delete.")
             return
 
         media_id = current_item.data(Qt.ItemDataRole.UserRole)
@@ -1557,9 +1973,9 @@ class MainWindow(QMainWindow):
             layer_names = ", ".join(ml.name for ml in layers_using)
             reply = QMessageBox.question(
                 self,
-                "Medium wird verwendet",
-                f"'{media.name}' wird von folgenden Layern verwendet:\n{layer_names}\n\n"
-                f"Trotzdem loeschen? (Layer behalten ihre Polygone, aber ohne Medium)",
+                "Media In Use",
+                f"'{media.name}' is used by the following layers:\n{layer_names}\n\n"
+                f"Delete anyway? (Layers keep their polygons, but without media)",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.No
             )
@@ -1604,19 +2020,17 @@ class MainWindow(QMainWindow):
         self._update_trees()
         self._update_canvas()
         self._update_output_windows()
-        self.statusbar.showMessage(f"Medium geloescht: {media.name}")
+        self.statusbar.showMessage(f"Media deleted: {media.name}")
 
     def _assign_media_to_layer(self, item: QListWidgetItem) -> None:
         """Weise Medium zu - Verhalten haengt von Selektion ab.
 
         Fall 1: Media Layer ist ausgewaehlt (_media_layer_selected=True)
                 -> Medium wird dem Media Layer zugewiesen (ersetzt)
-                -> Alle Polygone behalten ihre Positionen, nur neues Medium
 
-        Fall 2: Polygon ist ausgewaehlt (current_polygon is not None)
-                -> Suche Media Layer mit diesem Medium
-                -> Falls gefunden: Polygon wird dem Layer zugewiesen
-                -> Falls nicht: Neuer Media Layer wird erstellt und Polygon zugewiesen
+        Fall 2: Polygon(e) ausgewaehlt
+                -> Bei Multi-Select: Alle selektierten Polygone bekommen das Medium
+                -> Bei Single: Polygon dem passenden Layer zuweisen
         """
         media_id = item.data(Qt.ItemDataRole.UserRole)
         media = self.project.get_media_by_id(media_id)
@@ -1625,42 +2039,59 @@ class MainWindow(QMainWindow):
 
         if self._media_layer_selected and self.current_media_layer:
             # Fall 1: Media Layer ist ausgewaehlt - Medium ersetzen
-            self.current_media_layer.media_id = media_id
+            old_media_id = self.current_media_layer.media_id
+            cmd = MediaLayerMediaCommand(
+                self.current_media_layer, old_media_id, media_id,
+                self._full_refresh, f"Assign '{media.name}' to layer")
+            self.undo_stack.push(cmd)
             self.statusbar.showMessage(
-                f"'{media.name}' zugewiesen an Media Layer '{self.current_media_layer.name}'"
+                f"'{media.name}' assigned to Media Layer '{self.current_media_layer.name}'"
             )
 
-        elif self.current_polygon:
-            # Fall 2: Polygon ist ausgewaehlt
-            # Suche existierenden Media Layer mit diesem Medium
+        elif self.selected_polygons:
+            # Fall 2: Polygon(e) ausgewaehlt
+            # Suche/erstelle Media Layer fuer dieses Medium
             existing_layer = None
             for ml in self.project.media_layers:
                 if ml.media_id == media_id:
                     existing_layer = ml
                     break
 
-            if existing_layer:
-                # Layer gefunden - Polygon diesem Layer zuweisen
-                self.current_polygon.media_layer_id = existing_layer.id
-                self.current_media_layer = existing_layer
-                self.statusbar.showMessage(
-                    f"Polygon '{self.current_polygon.name}' -> Media Layer '{existing_layer.name}'"
-                )
-            else:
-                # Kein Layer mit diesem Medium - neuen erstellen
-                new_layer = self.project.add_media_layer(
+            if not existing_layer:
+                existing_layer = self.project.add_media_layer(
                     name=media.name,
                     media_id=media_id
                 )
-                self.current_polygon.media_layer_id = new_layer.id
-                self.current_media_layer = new_layer
-                self.statusbar.showMessage(
-                    f"Neuer Media Layer '{new_layer.name}' erstellt fuer Polygon '{self.current_polygon.name}'"
-                )
+
+            if len(self.selected_polygons) > 1:
+                # Multi-Select: Alle selektierten Polygone zuweisen
+                entries = []
+                for poly in self.selected_polygons:
+                    if poly.media_layer_id != existing_layer.id:
+                        entries.append((poly, "media_layer_id",
+                                        poly.media_layer_id, existing_layer.id))
+                if entries:
+                    cmd = MultiPolygonPropertyCommand(
+                        entries, self._full_refresh,
+                        f"Assign '{media.name}' to {len(entries)} polygons")
+                    self.undo_stack.push(cmd)
+            else:
+                # Single polygon
+                poly = self.selected_polygons[0]
+                if poly.media_layer_id != existing_layer.id:
+                    old_id = poly.media_layer_id
+                    cmd = PolygonPropertyCommand(
+                        poly, "media_layer_id", old_id, existing_layer.id,
+                        self._full_refresh, f"Assign '{media.name}' to polygon")
+                    self.undo_stack.push(cmd)
+
+            self.current_media_layer = existing_layer
+            self.statusbar.showMessage(
+                f"'{media.name}' assigned to {len(self.selected_polygons)} polygon(s)"
+            )
 
         else:
             # Weder Media Layer noch Polygon ausgewaehlt
-            # Neuen Media Layer erstellen
             new_layer = self.project.add_media_layer(
                 name=media.name,
                 media_id=media_id
@@ -1668,11 +2099,11 @@ class MainWindow(QMainWindow):
             self.current_media_layer = new_layer
             self._media_layer_selected = True
             self.statusbar.showMessage(
-                f"Neuer Media Layer '{new_layer.name}' erstellt"
+                f"New Media Layer '{new_layer.name}' created"
             )
+            self._update_canvas()
+            self._update_trees()
 
-        self._update_canvas()
-        self._update_trees()
         self._update_video_player()
 
     def _update_video_player(self) -> None:
@@ -1693,6 +2124,30 @@ class MainWindow(QMainWindow):
 
         self.video_player.set_active_media(media.id, media.path)
 
+    # === SETTINGS ===
+
+    def _apply_settings(self) -> None:
+        """Lade und wende gespeicherte Einstellungen an."""
+        backend = self.settings.value(SETTINGS_KEY_RENDERER, "opencv")
+        try:
+            set_renderer_backend(backend)
+        except ValueError:
+            set_renderer_backend("opencv")
+
+        show_fps = self.settings.value(SETTINGS_KEY_SHOW_FPS, False, type=bool)
+        self.output_canvas.set_show_fps(show_fps)
+        for window in self.output_windows.values():
+            window.set_show_fps(show_fps)
+
+    def _open_preferences(self) -> None:
+        """Oeffne Einstellungs-Dialog."""
+        dialog = SettingsDialog(self.settings, self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self._apply_settings()
+            self.statusbar.showMessage(
+                f"Settings saved (Renderer: {get_renderer_backend()})"
+            )
+
     # === OUTPUT WINDOW ===
 
     def _open_current_output_window(self) -> None:
@@ -1701,7 +2156,7 @@ class MainWindow(QMainWindow):
             if self.project.output_layers:
                 self.current_output_layer = self.project.output_layers[0]
             else:
-                QMessageBox.warning(self, "Fehler", "Kein Output Layer vorhanden!")
+                QMessageBox.warning(self, "Error", "No output layer available!")
                 return
 
         self._open_output_window(self.current_output_layer)
@@ -1711,6 +2166,14 @@ class MainWindow(QMainWindow):
         if output_layer.id not in self.output_windows:
             window = OutputWindow(output_layer, self.project, self.images)
             window.points_changed.connect(self._on_points_changed)
+            show_fps = self.settings.value(SETTINGS_KEY_SHOW_FPS, False, type=bool)
+            window.set_show_fps(show_fps)
+            # Freeze/Blackout State auf neues Fenster anwenden
+            if self._freeze_active:
+                window.set_freeze(True)
+            elif self._blackout_active:
+                window.set_blackout(True)
+            window.set_fb_alpha(self._fb_current_alpha)
             self.output_windows[output_layer.id] = window
 
         window = self.output_windows[output_layer.id]
@@ -1814,8 +2277,8 @@ class MainWindow(QMainWindow):
         """Neues Projekt erstellen."""
         if self.project.polygons:
             reply = QMessageBox.question(
-                self, "Neues Projekt",
-                "Aktuelles Projekt verwerfen?",
+                self, "New Project",
+                "Discard current project?",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
             )
             if reply == QMessageBox.StandardButton.No:
@@ -1831,7 +2294,16 @@ class MainWindow(QMainWindow):
         self.current_media_layer = None
         self.current_output_layer = None
         self.current_polygon = None
+        self.selected_polygons.clear()
+        self.undo_stack.clear()
         self.images.clear()
+
+        # Freeze/Blackout zuruecksetzen
+        self._freeze_active = False
+        self._blackout_active = False
+        self._fb_current_alpha = 0.0
+        self._fb_fade_start = None
+        self._update_freeze_blackout_ui()
 
         # Queue Manager aktualisieren
         if hasattr(self, 'queue_manager'):
@@ -1845,12 +2317,12 @@ class MainWindow(QMainWindow):
 
         self._add_media_layer()
         self._add_output_layer()
-        self.statusbar.showMessage("Neues Projekt erstellt")
+        self.statusbar.showMessage("New project created")
 
     def _open_project(self) -> None:
         """Projekt oeffnen."""
         filepath, _ = QFileDialog.getOpenFileName(
-            self, "Projekt oeffnen", "",
+            self, "Open Project", "",
             "Project Files (*.json);;All Files (*)"
         )
         if filepath:
@@ -1858,9 +2330,9 @@ class MainWindow(QMainWindow):
                 self._load_project_from_path(filepath)
                 # Settings aktualisieren
                 self.settings.setValue(SETTINGS_LAST_PROJECT, filepath)
-                self.statusbar.showMessage(f"Geladen: {filepath}")
+                self.statusbar.showMessage(f"Loaded: {filepath}")
             except Exception as e:
-                QMessageBox.critical(self, "Fehler", f"Fehler beim Laden: {e}")
+                QMessageBox.critical(self, "Error", f"Error loading: {e}")
 
     def _save_project(self) -> None:
         """Projekt speichern."""
@@ -1872,7 +2344,7 @@ class MainWindow(QMainWindow):
     def _save_project_as(self) -> None:
         """Projekt speichern unter."""
         filepath, _ = QFileDialog.getSaveFileName(
-            self, "Projekt speichern", "",
+            self, "Save Project", "",
             "Project Files (*.json);;All Files (*)"
         )
         if filepath:
@@ -1894,9 +2366,9 @@ class MainWindow(QMainWindow):
             # Letzten Projektpfad in Settings speichern
             self.settings.setValue(SETTINGS_LAST_PROJECT, filepath)
 
-            self.statusbar.showMessage(f"Gespeichert: {filepath}")
+            self.statusbar.showMessage(f"Saved: {filepath}")
         except Exception as e:
-            QMessageBox.critical(self, "Fehler", f"Fehler beim Speichern: {e}")
+            QMessageBox.critical(self, "Error", f"Error saving: {e}")
 
     def _auto_load_or_create(self) -> None:
         """Lade letztes Projekt automatisch oder erstelle neues."""
@@ -1905,7 +2377,7 @@ class MainWindow(QMainWindow):
         if last_path and Path(last_path).exists():
             try:
                 self._load_project_from_path(last_path)
-                self.statusbar.showMessage(f"Projekt geladen: {last_path}")
+                self.statusbar.showMessage(f"Project loaded: {last_path}")
                 return
             except Exception as e:
                 print(f"Auto-load failed: {e}")
@@ -1918,6 +2390,15 @@ class MainWindow(QMainWindow):
         """Lade Projekt aus Pfad und stelle Session-State wieder her."""
         self.project = Project.load(filepath)
         self.project_path = filepath
+        self.undo_stack.clear()
+        self.selected_polygons = []
+
+        # Freeze/Blackout zuruecksetzen
+        self._freeze_active = False
+        self._blackout_active = False
+        self._fb_current_alpha = 0.0
+        self._fb_fade_start = None
+        self._update_freeze_blackout_ui()
 
         # Queue Manager aktualisieren
         if hasattr(self, 'queue_manager'):
@@ -1938,7 +2419,7 @@ class MainWindow(QMainWindow):
                 if image is not None:
                     self.images[media.id] = image
                 else:
-                    missing_files.append(f"{media.name} (Laden fehlgeschlagen: {media.path})")
+                    missing_files.append(f"{media.name} (load failed: {media.path})")
 
             elif media.media_type == "video":
                 if not Path(media.path).exists():
@@ -1982,6 +2463,12 @@ class MainWindow(QMainWindow):
         if not self.current_polygon and self.project.polygons:
             self.current_polygon = self.project.polygons[0]
 
+        # selected_polygons synchronisieren
+        if self.current_polygon:
+            self.selected_polygons = [self.current_polygon]
+        else:
+            self.selected_polygons = []
+
         self._update_canvas()
         self._update_polygon_combos()
 
@@ -1994,10 +2481,10 @@ class MainWindow(QMainWindow):
         if missing_files:
             QMessageBox.warning(
                 self,
-                "Fehlende Mediendateien",
-                f"Folgende Dateien konnten nicht geladen werden:\n\n" +
+                "Missing Media Files",
+                f"The following files could not be loaded:\n\n" +
                 "\n".join(missing_files[:10]) +
-                (f"\n\n... und {len(missing_files) - 10} weitere" if len(missing_files) > 10 else "")
+                (f"\n\n... and {len(missing_files) - 10} more" if len(missing_files) > 10 else "")
             )
 
     def eventFilter(self, obj, event) -> bool:

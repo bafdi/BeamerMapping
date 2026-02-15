@@ -194,10 +194,109 @@ project.get_polygons_for_output_layer(layer_id)
 |-------|----------|
 | Enter | Ausgewaehltes Element umbenennen |
 | Delete | Ausgewaehltes Element loeschen |
+| Ctrl+, | Einstellungen oeffnen |
+| F / Shift+F | Freeze mit Fade / instant |
+| B / Shift+B | Blackout mit Fade / instant |
 | F5 | Ausgewaehlten Output oeffnen |
 | F11 | Output Fullscreen |
 | Doppelklick auf Media Layer | Sichtbarkeit umschalten |
 | Doppelklick auf Output Layer | Output-Fenster oeffnen |
+
+---
+
+## Rendering-Pipeline
+
+### Backend-Dispatch
+
+`composite_polygons_fast()` in `transform.py` waehlt zur Laufzeit zwischen zwei Backends:
+
+```
+composite_polygons_fast(polygons_data, output_size, result_buffer)
+    │
+    ├─ renderer_backend == "opencv"
+    │   └─ _composite_opencv()
+    │       Pro Polygon:
+    │         1. cv2.getPerspectiveTransform (gecacht per lru_cache)
+    │         2. cv2.warpPerspective (INTER_LINEAR)
+    │         3. cv2.fillPoly (Maske) + np.copyto (Blending)
+    │
+    └─ renderer_backend == "opengl"
+        └─ _composite_opengl()  →  GLCompositor.composite()
+            │  Bei Fehler: automatischer Fallback auf OpenCV
+            │
+            1. moderngl standalone context (headless, kein Fenster)
+            2. Pro Polygon: Full-screen Quad rendern
+            3. Fragment-Shader: inverse Homographie pro Pixel
+            4. FBO auslesen → numpy array
+```
+
+### OpenGL Fragment-Shader
+
+Der Shader fuehrt fuer jeden Output-Pixel folgende Schritte aus:
+
+1. **Bounding-Box Test** — Frueher Ausschluss von Pixeln ausserhalb des Polygons
+2. **Polygon-Containment** — Winding-Test ob Pixel im Quad liegt
+3. **Inverse Homographie** — `output_pixel * H_inv → source_pixel`
+4. **Textur-Sampling** — Bilineares Sampling der Quell-Textur
+
+Vorteile gegenueber OpenCV:
+- Kein separater Warp + Mask-Schritt noetig
+- Massiv parallelisiert auf GPU
+- Besonders schnell bei vielen/grossen Polygonen
+
+### Einstellungen
+
+Gesteuert ueber QSettings (persistent):
+
+| Key | Typ | Default | Beschreibung |
+|-----|-----|---------|-------------|
+| `renderer_backend` | string | `"opencv"` | `"opencv"` oder `"opengl"` |
+| `show_fps` | bool | `false` | FPS-Anzeige im Output-Canvas und Output-Fenster |
+| `freeze_blackout_fade_ms` | int | `500` | Fade-Dauer in ms fuer Freeze/Blackout (0 = instant) |
+| `last_project_path` | string | `""` | Pfad zum zuletzt geoeffneten Projekt |
+
+### Freeze & Blackout
+
+Freeze und Blackout unterstuetzen konfigurierbare Fade-Uebergaenge:
+
+- **Klick / Taste (F/B):** Toggle mit Fade (konfigurierte Dauer aus Preferences)
+- **Shift+Klick / Shift+Taste:** Toggle instant (sofort, kein Fade)
+- **`_fb_alpha`** (0.0–1.0): Blend-Wert auf jedem OutputWindow
+  - 0.0 = Live-Output, 1.0 = voll eingefroren/schwarz
+  - Fade-Animation wird vom 60Hz Transition-Timer gesteuert
+- **Gegenseitige Exklusivitaet:** Aktivierung von Freeze stoppt Blackout und umgekehrt
+- **Canvas-Border:** Output-Canvas zeigt farbigen Rahmen (cyan=Freeze, rot=Blackout) mit Opacity proportional zum Alpha
+- **Blending in `_render_all_polygons()`:**
+  - Blackout: `composite * (1 - alpha)` (Richtung schwarz)
+  - Freeze: `cv2.addWeighted(live, 1-alpha, frozen, alpha, 0)` (Blend mit eingefrorenem Frame)
+
+### FPS-Counter
+
+- Zaehlt Paint-Events pro Sekunde (1s Fenster, `time.monotonic()`)
+- Anzeige oben rechts mit halbtransparentem Hintergrund
+- Verfuegbar im Output-Canvas (`canvas.py`) und im Output-Fenster (`output_window.py`)
+- Aktivierung ueber File > Preferences
+
+---
+
+## Dateistruktur
+
+```
+src/mapper/
+├── __init__.py
+├── main_window.py       # Hauptfenster, Menues, Settings-Integration
+├── canvas.py            # PolygonCanvas (Source/Output Bearbeitung)
+├── output_window.py     # Frameless Output-Fenster (Projektor)
+├── transform.py         # Homographie, Compositing, Backend-Dispatch
+├── gl_renderer.py       # GPU-Compositing via moderngl
+├── settings_dialog.py   # Einstellungs-Dialog (Renderer, FPS)
+├── models.py            # Datenmodelle (Project, Polygon, Layer)
+├── queue_manager.py     # Queue/Cue-System
+├── queue_grid.py        # Queue-Grid Widget
+├── video_player.py      # Video-Playback mit Audio
+├── live_sources.py      # Kamera- und Screen-Capture
+└── test_patterns.py     # Test-Pattern Generator
+```
 
 ---
 

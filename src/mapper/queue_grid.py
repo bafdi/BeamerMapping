@@ -8,11 +8,11 @@ import numpy as np
 import cv2
 
 from PyQt6.QtCore import Qt, pyqtSignal, QSize
-from PyQt6.QtGui import QImage, QPixmap
+from PyQt6.QtGui import QImage, QPixmap, QPainter, QColor, QPaintEvent
 from PyQt6.QtWidgets import (
     QWidget, QFrame, QVBoxLayout, QHBoxLayout, QGridLayout,
     QPushButton, QLabel, QMenu, QInputDialog, QMessageBox,
-    QDialog, QComboBox, QSpinBox, QFormLayout, QDialogButtonBox,
+    QDialog, QComboBox, QSpinBox, QSlider, QFormLayout, QDialogButtonBox,
     QSizePolicy
 )
 
@@ -27,7 +27,7 @@ class QueueEditDialog(QDialog):
 
     def __init__(self, queue: Optional[Queue] = None, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Queue bearbeiten" if queue else "Queue speichern")
+        self.setWindowTitle("Edit Queue" if queue else "Save Queue")
         self.setMinimumWidth(300)
 
         self.queue = queue
@@ -61,7 +61,7 @@ class QueueEditDialog(QDialog):
         self.duration_spin.setRange(0, 10000)
         self.duration_spin.setSuffix(" ms")
         self.duration_spin.setValue(queue.transition.duration_ms if queue else 500)
-        form.addRow("Dauer:", self.duration_spin)
+        form.addRow("Duration:", self.duration_spin)
 
         # Easing
         self.easing_combo = QComboBox()
@@ -71,6 +71,25 @@ class QueueEditDialog(QDialog):
             if idx >= 0:
                 self.easing_combo.setCurrentIndex(idx)
         form.addRow("Easing:", self.easing_combo)
+
+        # Overlap Slider
+        overlap_container = QHBoxLayout()
+        self.overlap_slider = QSlider(Qt.Orientation.Horizontal)
+        self.overlap_slider.setRange(0, 100)
+        self.overlap_slider.setValue(int((queue.transition.overlap if queue else 0.5) * 100))
+        self.overlap_slider.setToolTip("0% = Dip-to-Black, 50% = Standard, 100% = Additive")
+        self.overlap_label = QLabel(f"{self.overlap_slider.value()}%")
+        self.overlap_label.setFixedWidth(35)
+        self.overlap_slider.valueChanged.connect(
+            lambda v: self.overlap_label.setText(f"{v}%"))
+        overlap_container.addWidget(self.overlap_slider)
+        overlap_container.addWidget(self.overlap_label)
+        self.overlap_row_label = QLabel("Overlap:")
+        form.addRow(self.overlap_row_label, overlap_container)
+
+        # Overlap nur sichtbar wenn Transition != "instant"
+        self._update_overlap_visibility(self.transition_combo.currentText())
+        self.transition_combo.currentTextChanged.connect(self._update_overlap_visibility)
 
         layout.addLayout(form)
 
@@ -82,6 +101,13 @@ class QueueEditDialog(QDialog):
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
+    def _update_overlap_visibility(self, mode: str) -> None:
+        """Zeige/Verstecke Overlap-Slider basierend auf Transition-Modus."""
+        visible = mode != "instant"
+        self.overlap_slider.setVisible(visible)
+        self.overlap_label.setVisible(visible)
+        self.overlap_row_label.setVisible(visible)
+
     def get_name(self) -> str:
         return self.name_input.currentText()
 
@@ -90,6 +116,7 @@ class QueueEditDialog(QDialog):
             mode=self.transition_combo.currentText(),
             duration_ms=self.duration_spin.value(),
             easing=self.easing_combo.currentText(),
+            overlap=self.overlap_slider.value() / 100.0,
         )
 
 
@@ -105,6 +132,7 @@ class QueueButton(QFrame):
         super().__init__(parent)
         self.index = index
         self.queue: Optional[Queue] = None
+        self._transition_progress: float = 0.0
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setMinimumSize(80, 60)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
@@ -201,12 +229,28 @@ class QueueButton(QFrame):
                 }
             """)
 
+    def set_transition_progress(self, progress: float) -> None:
+        """Setze Transition-Fortschritt (0.0-1.0)."""
+        self._transition_progress = progress
+        self.update()
+
     def resizeEvent(self, event) -> None:
         """Update thumbnail size on resize."""
         super().resizeEvent(event)
         if self.queue and self.queue.thumbnail:
             # Re-scale thumbnail
             self._update_display()
+
+    def paintEvent(self, event: QPaintEvent) -> None:
+        """Zeichne Button + Fortschrittsbalken."""
+        super().paintEvent(event)
+        if self._transition_progress > 0:
+            painter = QPainter(self)
+            bar_h = 4
+            bar_w = int(self.width() * self._transition_progress)
+            painter.fillRect(0, self.height() - bar_h, bar_w, bar_h,
+                             QColor(0, 170, 255, 220))
+            painter.end()
 
     def mousePressEvent(self, event) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
@@ -225,21 +269,21 @@ class QueueButton(QFrame):
         menu = QMenu(self)
 
         if self.queue:
-            recall_action = menu.addAction("Abrufen")
+            recall_action = menu.addAction("Recall")
             recall_action.triggered.connect(lambda: self.queue_triggered.emit(self.queue.id))
 
-            edit_action = menu.addAction("Bearbeiten...")
+            edit_action = menu.addAction("Edit...")
             edit_action.triggered.connect(lambda: self.queue_edit_requested.emit(self.index))
 
             menu.addSeparator()
 
-            overwrite_action = menu.addAction("Ueberschreiben")
+            overwrite_action = menu.addAction("Overwrite")
             overwrite_action.triggered.connect(lambda: self.queue_save_requested.emit(self.index))
 
-            delete_action = menu.addAction("Loeschen")
+            delete_action = menu.addAction("Delete")
             delete_action.triggered.connect(lambda: self.queue_delete_requested.emit(self.index))
         else:
-            save_action = menu.addAction("Hier speichern")
+            save_action = menu.addAction("Save here")
             save_action.triggered.connect(lambda: self.queue_save_requested.emit(self.index))
 
         menu.exec(self.mapToGlobal(pos))
@@ -257,6 +301,7 @@ class QueueGridWidget(QWidget):
         self.num_columns = 8
         self.num_rows = 4
         self._capture_thumbnail_callback: Optional[Callable[[], Optional[np.ndarray]]] = None
+        self._active_transition_index: int = -1
         self._setup_ui()
 
     def set_capture_callback(self, callback: Callable[[], Optional[np.ndarray]]) -> None:
@@ -333,10 +378,24 @@ class QueueGridWidget(QWidget):
         """Extern aufrufbar um Grid zu aktualisieren."""
         self._update_buttons()
 
+    def set_transition_progress(self, progress: float) -> None:
+        """Setze Transition-Fortschritt am aktiven Button."""
+        if self._active_transition_index >= 0 and self._active_transition_index < len(self.buttons):
+            btn = self.buttons[self._active_transition_index]
+            if progress <= 0 or progress >= 1.0:
+                btn.set_transition_progress(0.0)
+                self._active_transition_index = -1
+            else:
+                btn.set_transition_progress(progress)
+
     def _on_queue_triggered(self, queue_id: str) -> None:
         """Handle Queue-Abruf."""
         queue = self.queue_manager.project.get_queue_by_id(queue_id)
         if queue:
+            # Vorherigen Transition-Button zuruecksetzen
+            if self._active_transition_index >= 0 and self._active_transition_index < len(self.buttons):
+                self.buttons[self._active_transition_index].set_transition_progress(0.0)
+            self._active_transition_index = queue.index
             self.queue_manager.recall_queue(queue)
             self.queue_recalled.emit(queue_id)
 
@@ -384,8 +443,8 @@ class QueueGridWidget(QWidget):
 
         reply = QMessageBox.question(
             self,
-            "Queue loeschen",
-            f"Queue '{queue.name}' wirklich loeschen?",
+            "Delete Queue",
+            f"Delete queue '{queue.name}'?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No
         )

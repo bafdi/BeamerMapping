@@ -1,9 +1,10 @@
 """Queue Manager - Verwaltet Queue-Operationen und Transitions."""
 
 from __future__ import annotations
+import math
 import time
 from datetime import datetime
-from typing import Optional, TYPE_CHECKING
+from typing import Optional, Dict, Set, TYPE_CHECKING
 
 from .models import (
     Project, Queue, MediaLayerState, PolygonState, QueueTransition
@@ -23,11 +24,18 @@ class QueueManager:
         # Transition state
         self._active_transition: Optional[QueueTransition] = None
         self._transition_start_time: float = 0
-        self._transition_from_state: Optional[Queue] = None
         self._transition_to_state: Optional[Queue] = None
+        self._transition_progress: float = 0.0
 
-        # Callback for UI updates during transitions
+        # Audio-Volumes vom Zustand vor dem Wechsel (media_id -> volume)
+        self._transition_from_audio: Dict[str, float] = {}
+
+        # Videos die waehrend Transition weiterlaufen muessen
+        self._transition_keep_alive: Set[str] = set()
+
+        # Callbacks
         self._on_transition_update: Optional[callable] = None
+        self._on_pre_transition: Optional[callable] = None
 
     def set_project(self, project: Project) -> None:
         """Setze das aktive Projekt."""
@@ -36,6 +44,15 @@ class QueueManager:
     def set_on_transition_update(self, callback: callable) -> None:
         """Setze Callback fuer Transition-Updates."""
         self._on_transition_update = callback
+
+    def set_on_pre_transition(self, callback: callable) -> None:
+        """Setze Callback der VOR dem State-Wechsel aufgerufen wird (fuer Snapshot)."""
+        self._on_pre_transition = callback
+
+    @property
+    def transition_progress(self) -> float:
+        """Aktueller Transition-Fortschritt (0.0-1.0)."""
+        return self._transition_progress
 
     # === Snapshot erstellen ===
 
@@ -88,8 +105,14 @@ class QueueManager:
         else:
             self._start_transition(queue)
 
-    def _apply_state_instant(self, queue: Queue) -> None:
-        """Wendet State sofort an (kein Fade)."""
+    def _apply_state_instant(self, queue: Queue,
+                             keep_videos_alive: Optional[Set[str]] = None) -> None:
+        """Wendet State sofort an.
+
+        Args:
+            keep_videos_alive: Set von media_ids deren Decoder nicht gestoppt/
+                               geseeked werden sollen (fuer Crossfade mit laufendem Video).
+        """
         # Media Layer States
         for mls in queue.media_layer_states:
             ml = self.project.get_media_layer_by_id(mls.media_layer_id)
@@ -102,6 +125,17 @@ class QueueManager:
             # Video Playback
             if mls.media_id and mls.media_id in self.video_player.decoders:
                 decoder = self.video_player.decoders[mls.media_id]
+
+                if keep_videos_alive and mls.media_id in keep_videos_alive:
+                    # Transition: altes Video weiterlaufen lassen
+                    # Nur neue Videos starten, kein Seek/Pause
+                    if mls.playing and not decoder.playing:
+                        decoder.start()
+                        if mls.media_id in self.video_player.audio_players:
+                            player, _ = self.video_player.audio_players[mls.media_id]
+                            player.play()
+                    continue
+
                 decoder.seek(mls.current_time)
                 decoder.looping = mls.looping
                 self.video_player._volumes[mls.media_id] = mls.volume
@@ -139,11 +173,31 @@ class QueueManager:
     # === Transitions ===
 
     def _start_transition(self, queue: Queue) -> None:
-        """Startet eine animierte Transition."""
-        self._transition_from_state = self.capture_current_state()
+        """Startet eine animierte Transition mit Output-Level Crossfade."""
+        # 1. Audio-From-State capturen (Volumes vor dem Wechsel)
+        self._transition_from_audio.clear()
+        for media_id, volume in self.video_player._volumes.items():
+            self._transition_from_audio[media_id] = volume
+
+        # 2. Laufende Videos tracken (muessen fuer Crossfade weiterlaufen)
+        self._transition_keep_alive.clear()
+        for ml in self.project.media_layers:
+            if ml.media_id and ml.media_id in self.video_player.decoders:
+                if self.video_player.decoders[ml.media_id].playing:
+                    self._transition_keep_alive.add(ml.media_id)
+
+        # 3. Pre-Transition Callback (Renderer captured "from" state)
+        if self._on_pre_transition:
+            self._on_pre_transition()
+
+        # 4. State sofort anwenden ABER alte Videos weiterlaufen lassen
+        self._apply_state_instant(queue, keep_videos_alive=self._transition_keep_alive)
+
+        # 5. Timer-Variablen setzen
         self._transition_to_state = queue
         self._transition_start_time = time.time()
         self._active_transition = queue.transition
+        self._transition_progress = 0.0
 
     def update_transition(self) -> bool:
         """Update Transition (aufrufen im Timer). Returns True wenn aktiv."""
@@ -151,22 +205,38 @@ class QueueManager:
             return False
 
         elapsed = (time.time() - self._transition_start_time) * 1000
-        progress = min(1.0, elapsed / self._active_transition.duration_ms)
-        progress = self._apply_easing(progress, self._active_transition.easing)
+        duration = max(1, self._active_transition.duration_ms)
+        raw_progress = min(1.0, elapsed / duration)
+        progress = self._apply_easing(raw_progress, self._active_transition.easing)
 
-        # Interpoliere States
-        self._interpolate_states(progress)
+        self._transition_progress = progress
+
+        # Audio-Volume interpolieren bei "dissolve"
+        if self._active_transition.mode == "dissolve" and self._transition_to_state:
+            for to_mls in self._transition_to_state.media_layer_states:
+                if not to_mls.media_id:
+                    continue
+                from_vol = self._transition_from_audio.get(to_mls.media_id, 0.0)
+                to_vol = to_mls.volume
+                new_vol = self._lerp(from_vol, to_vol, progress)
+                self.video_player._volumes[to_mls.media_id] = new_vol
+
+                if to_mls.media_id in self.video_player.audio_players:
+                    _, audio_output = self.video_player.audio_players[to_mls.media_id]
+                    audio_output.setVolume(new_vol)
 
         # Callback fuer UI Update
         if self._on_transition_update:
             self._on_transition_update()
 
-        if progress >= 1.0:
-            # Transition fertig - finalen State anwenden
-            self._apply_state_instant(self._transition_to_state)
+        if raw_progress >= 1.0:
+            # Transition fertig - aufgeschobene Video-States anwenden
+            self._apply_deferred_video_states()
+            self._transition_progress = 0.0
             self._active_transition = None
-            self._transition_from_state = None
             self._transition_to_state = None
+            self._transition_from_audio.clear()
+            self._transition_keep_alive.clear()
             return False
 
         return True
@@ -175,68 +245,53 @@ class QueueManager:
         """Gibt zurueck ob eine Transition aktiv ist."""
         return self._active_transition is not None
 
-    def _interpolate_states(self, t: float) -> None:
-        """Interpoliert zwischen from_state und to_state."""
-        if not self._transition_from_state or not self._transition_to_state:
+    def _apply_deferred_video_states(self) -> None:
+        """Wende aufgeschobene Video-States an (nach Transition-Ende)."""
+        if not self._transition_to_state or not self._transition_keep_alive:
             return
 
-        # Polygon Points interpolieren
-        for to_ps in self._transition_to_state.polygon_states:
-            poly = self.project.get_polygon_by_id(to_ps.polygon_id)
-            if not poly:
+        for mls in self._transition_to_state.media_layer_states:
+            if not mls.media_id or mls.media_id not in self._transition_keep_alive:
+                continue
+            if mls.media_id not in self.video_player.decoders:
                 continue
 
-            # Finde from_state
-            from_ps = None
-            for ps in self._transition_from_state.polygon_states:
-                if ps.polygon_id == to_ps.polygon_id:
-                    from_ps = ps
-                    break
+            decoder = self.video_player.decoders[mls.media_id]
+            decoder.seek(mls.current_time)
+            decoder.looping = mls.looping
+            self.video_player._volumes[mls.media_id] = mls.volume
+            self.video_player._muted[mls.media_id] = mls.muted
 
-            if not from_ps:
-                continue
+            if mls.media_id in self.video_player.audio_players:
+                _, audio_output = self.video_player.audio_players[mls.media_id]
+                audio_output.setVolume(mls.volume)
+                audio_output.setMuted(mls.muted)
 
-            # Lineare Interpolation der Punkte
-            for i in range(min(4, len(poly.source_points), len(from_ps.source_points), len(to_ps.source_points))):
-                poly.source_points[i][0] = self._lerp(
-                    from_ps.source_points[i][0],
-                    to_ps.source_points[i][0],
-                    t
-                )
-                poly.source_points[i][1] = self._lerp(
-                    from_ps.source_points[i][1],
-                    to_ps.source_points[i][1],
-                    t
-                )
+            if mls.playing and not decoder.playing:
+                decoder.start()
+                if mls.media_id in self.video_player.audio_players:
+                    player, _ = self.video_player.audio_players[mls.media_id]
+                    player.setPosition(int(mls.current_time * 1000))
+                    player.play()
+            elif not mls.playing and decoder.playing:
+                decoder.pause()
+                if mls.media_id in self.video_player.audio_players:
+                    player, _ = self.video_player.audio_players[mls.media_id]
+                    player.pause()
 
-            for i in range(min(4, len(poly.output_points), len(from_ps.output_points), len(to_ps.output_points))):
-                poly.output_points[i][0] = self._lerp(
-                    from_ps.output_points[i][0],
-                    to_ps.output_points[i][0],
-                    t
-                )
-                poly.output_points[i][1] = self._lerp(
-                    from_ps.output_points[i][1],
-                    to_ps.output_points[i][1],
-                    t
-                )
+    @staticmethod
+    def compute_blend_alphas(t: float, overlap: float) -> tuple[float, float]:
+        """Berechne Blend-Alphas fuer Crossfade mit Power-Curve.
 
-        # Volume interpolieren (fuer Dissolve-Effekt)
-        if self._active_transition.mode == "dissolve":
-            for to_mls in self._transition_to_state.media_layer_states:
-                from_mls = None
-                for mls in self._transition_from_state.media_layer_states:
-                    if mls.media_layer_id == to_mls.media_layer_id:
-                        from_mls = mls
-                        break
-
-                if from_mls and to_mls.media_id:
-                    new_vol = self._lerp(from_mls.volume, to_mls.volume, t)
-                    self.video_player._volumes[to_mls.media_id] = new_vol
-
-                    if to_mls.media_id in self.video_player.audio_players:
-                        _, audio_output = self.video_player.audio_players[to_mls.media_id]
-                        audio_output.setVolume(new_vol)
+        Returns: (from_alpha, to_alpha)
+        """
+        if overlap <= 0.0:
+            p = 20.0
+        else:
+            p = math.log(overlap) / math.log(0.5)
+        from_alpha = (1.0 - t) ** p
+        to_alpha = t ** p
+        return from_alpha, to_alpha
 
     @staticmethod
     def _lerp(a: float, b: float, t: float) -> float:

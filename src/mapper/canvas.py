@@ -1,17 +1,19 @@
 """Canvas-Widgets fuer Polygon-Bearbeitung."""
 
+import time
 from typing import Optional, List, Tuple, Dict, Callable
 from enum import Enum, auto
 import math
+import cv2
 import numpy as np
 
 from PyQt6.QtCore import Qt, QPoint, QPointF, pyqtSignal
 from PyQt6.QtGui import (
     QImage, QPixmap, QPainter, QPen, QBrush, QColor,
     QMouseEvent, QPaintEvent, QKeyEvent, QWheelEvent, QPolygon,
-    QCursor
+    QCursor, QFont
 )
-from PyQt6.QtWidgets import QWidget, QSizePolicy, QPushButton
+from PyQt6.QtWidgets import QWidget, QSizePolicy, QPushButton, QMenu
 
 from .models import Polygon, MediaLayer, Project
 from .transform import numpy_to_qimage, warp_image, composite_polygons_fast
@@ -30,7 +32,8 @@ class PolygonCanvas(QWidget):
     """Canvas zum Bearbeiten von Polygon-Punkten."""
 
     points_changed = pyqtSignal()
-    polygon_selected = pyqtSignal(object)  # (polygon)
+    polygon_selected = pyqtSignal(object, int)  # (polygon, modifiers)
+    reset_points_requested = pyqtSignal()
 
     # Feste Aspect Ratio fuer Output (16:9)
     OUTPUT_ASPECT_RATIO = 16 / 9
@@ -94,12 +97,8 @@ class PolygonCanvas(QWidget):
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
-        # Fit-Button (unten rechts im Canvas)
-        self._fit_btn = QPushButton("\u2922", self)  # ⤢ icon
-        self._fit_btn.setFixedSize(24, 24)
-        self._fit_btn.setToolTip("Zoom/Pan zuruecksetzen")
-        self._fit_btn.clicked.connect(self.reset_view)
-        self._fit_btn.setStyleSheet("""
+        # Button-Style fuer Overlay-Buttons (unten rechts im Canvas)
+        overlay_btn_style = """
             QPushButton {
                 background: rgba(80, 80, 80, 180);
                 color: white;
@@ -108,11 +107,49 @@ class PolygonCanvas(QWidget):
                 font-size: 14px;
             }
             QPushButton:hover { background: rgba(120, 120, 120, 220); }
-        """)
+        """
+
+        # Reset-Button (unten rechts im Canvas, links neben Fit)
+        reset_label = "\u21BA" # ↺
+        reset_tip = "Source-Punkte zurücksetzen" if mode == "source" else "Output-Punkte zurücksetzen"
+        self._reset_btn = QPushButton(reset_label, self)
+        self._reset_btn.setFixedSize(24, 24)
+        self._reset_btn.setToolTip(reset_tip)
+        self._reset_btn.clicked.connect(self.reset_points_requested.emit)
+        self._reset_btn.setStyleSheet(overlay_btn_style)
+
+        # Fit-Button (unten rechts im Canvas)
+        self._fit_btn = QPushButton("\u2922", self)  # ⤢ icon
+        self._fit_btn.setFixedSize(24, 24)
+        self._fit_btn.setToolTip("Reset zoom/pan")
+        self._fit_btn.clicked.connect(self.reset_view)
+        self._fit_btn.setStyleSheet(overlay_btn_style)
+
+        # FPS Counter
+        self._show_fps = False
+        self._fps_frame_count = 0
+        self._fps_last_time = time.monotonic()
+        self._fps_value = 0.0
 
         # Performance: Reusable render buffer
         self._render_buffer: Optional[np.ndarray] = None
         self._last_render_size: tuple = (0, 0)
+
+        # Crossfade state (nur fuer Output-Canvas): Live-Rendering
+        self._crossfade_from_data: Optional[List[tuple]] = None
+        self._crossfade_from_alpha: float = 1.0
+        self._crossfade_to_alpha: float = 0.0
+        self._crossfade_buffer: Optional[np.ndarray] = None
+        self._crossfade_buffer_size: tuple = (0, 0)
+
+        # Border Highlight (Freeze/Blackout Indikator)
+        self._border_color: Optional[QColor] = None
+
+        # Multi-Select
+        self.selected_polygons: List[Polygon] = []
+        self._undo_stack = None
+        self._refresh_cb = None
+        self._multi_drag_start: Optional[Dict[str, List[List[float]]]] = None
 
     def reset_view(self) -> None:
         """Setze Zoom und Pan zurueck."""
@@ -166,6 +203,64 @@ class PolygonCanvas(QWidget):
     def set_all_images(self, images: Dict[str, np.ndarray]) -> None:
         """Legacy: Setze alle Bilder."""
         self.all_images = images
+        self.update()
+
+    def set_show_fps(self, enabled: bool) -> None:
+        """Aktiviere/Deaktiviere FPS-Anzeige."""
+        self._show_fps = enabled
+        self._fps_frame_count = 0
+        self._fps_last_time = time.monotonic()
+        self._fps_value = 0.0
+        self.update()
+
+    def capture_crossfade_snapshot(self) -> None:
+        """Capture aktuellen Render-State fuer Live-Crossfade.
+
+        Speichert Polygon-Daten (media_id + Punkt-Kopien) statt statischem
+        Screenshot, damit laufende Videos im Crossfade weiterlaufen.
+        """
+        if self.mode != "output":
+            return
+
+        self._crossfade_from_data = []
+        for poly in self.all_polygons:
+            if not poly.media_layer_id:
+                continue
+            media_layer = self.project.get_media_layer_by_id(poly.media_layer_id)
+            if not media_layer or not media_layer.visible or not media_layer.media_id:
+                continue
+            image = self.all_images.get(media_layer.media_id)
+            if image is not None:
+                self._crossfade_from_data.append((
+                    media_layer.media_id,
+                    [p.copy() for p in poly.source_points],
+                    [p.copy() for p in poly.output_points],
+                ))
+
+    def set_crossfade_alphas(self, from_alpha: float, to_alpha: float) -> None:
+        """Setze Blend-Alphas fuer Crossfade."""
+        self._crossfade_from_alpha = from_alpha
+        self._crossfade_to_alpha = to_alpha
+        if to_alpha >= 1.0 and from_alpha <= 0.0:
+            self._crossfade_from_data = None
+            self._crossfade_buffer = None
+
+    def set_border_highlight(self, color: Optional[QColor], alpha: float = 1.0) -> None:
+        """Setze Rahmenfarbe fuer Freeze/Blackout Indikator (None = kein Rahmen)."""
+        if color is not None:
+            color = QColor(color)
+            color.setAlphaF(alpha)
+        self._border_color = color
+        self.update()
+
+    def set_undo_stack(self, stack) -> None:
+        self._undo_stack = stack
+
+    def set_refresh_callback(self, cb) -> None:
+        self._refresh_cb = cb
+
+    def set_selected_polygons(self, polygons: List[Polygon]) -> None:
+        self.selected_polygons = polygons
         self.update()
 
     def _update_pixmap(self) -> None:
@@ -357,15 +452,17 @@ class PolygonCanvas(QWidget):
     def _get_cursor_for_handle(self, handle_type: HandleType, corner: int = -1) -> QCursor:
         """Hole passenden Cursor fuer Handle-Typ."""
         if handle_type == HandleType.ROTATE:
-            # Rotation: CrossCursor als Platzhalter (idealerweise custom)
             return QCursor(Qt.CursorShape.CrossCursor)
         elif handle_type == HandleType.POINT:
+            # Gesperrtes Polygon: ForbiddenCursor fuer Eckpunkte (ohne Shift)
+            if (self.current_polygon and self.current_polygon.locked
+                    and not self.maintain_aspect_ratio):
+                return QCursor(Qt.CursorShape.ForbiddenCursor)
             return QCursor(Qt.CursorShape.CrossCursor)
         elif handle_type == HandleType.CORNER:
-            # Diagonal resize basierend auf Ecke
-            if corner in [0, 2]:  # TL, BR
+            if corner in [0, 2]:
                 return QCursor(Qt.CursorShape.SizeFDiagCursor)
-            else:  # TR, BL
+            else:
                 return QCursor(Qt.CursorShape.SizeBDiagCursor)
         elif handle_type == HandleType.CENTER:
             return QCursor(Qt.CursorShape.SizeAllCursor)
@@ -389,9 +486,6 @@ class PolygonCanvas(QWidget):
         for px, py in points:
             new_x = cx + (px - cx) * scale_x
             new_y = cy + (py - cy) * scale_y
-            # Clamp auf [0, 1]
-            new_x = max(0.0, min(1.0, new_x))
-            new_y = max(0.0, min(1.0, new_y))
             result.append([new_x, new_y])
         return result
 
@@ -530,6 +624,13 @@ class PolygonCanvas(QWidget):
 
         painter.setClipping(False)
 
+        # Farbiger Rahmen (Freeze/Blackout Indikator)
+        if self._border_color is not None:
+            border_pen = QPen(self._border_color, 4)
+            painter.setPen(border_pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRect(cx + 2, cy + 2, cw - 4, ch - 4)
+
         # Kleine Labels
         painter.setPen(QColor(150, 150, 150))
         label = "Source" if self.mode == "source" else "Output"
@@ -542,12 +643,18 @@ class PolygonCanvas(QWidget):
         # Handle-Hints
         if self.current_polygon:
             hints = []
+            poly_is_locked = self.current_polygon.locked if hasattr(self.current_polygon, 'locked') else False
             if self.active_handle == HandleType.ROTATE or self.hovered_handle == HandleType.ROTATE:
                 hints.append("Rotate")
             elif self.active_handle == HandleType.CENTER or self.hovered_handle == HandleType.CENTER:
                 hints.append("Move")
             elif self.active_handle == HandleType.POINT or self.hovered_handle == HandleType.POINT:
-                if self.maintain_aspect_ratio:
+                if poly_is_locked:
+                    if self.maintain_aspect_ratio:
+                        hints.append("Scale (uniform)")
+                    else:
+                        hints.append("Locked | Shift: Scale")
+                elif self.maintain_aspect_ratio:
                     hints.append("Scale (uniform)")
                 else:
                     hints.append("Drag point | Shift: Scale")
@@ -593,7 +700,7 @@ class PolygonCanvas(QWidget):
         if not self.all_polygons:
             painter.setPen(QColor(120, 120, 120))
             painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter,
-                             "Kein Polygon ausgewaehlt")
+                             "No polygon selected")
 
     def _draw_output_view(self, painter: QPainter) -> None:
         """Zeichne Output-Ansicht als Live-Preview."""
@@ -605,11 +712,40 @@ class PolygonCanvas(QWidget):
         # Dann Edit-Overlay fuer alle Polygone
         self._draw_all_polygons(painter)
 
+        # FPS Overlay (nur im Output-Canvas)
+        if self._show_fps:
+            self._draw_fps_overlay(painter)
+
         # Kein Polygon-Hinweis
         if not self.all_polygons:
             painter.setPen(QColor(120, 120, 120))
             painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter,
-                             "Kein Polygon ausgewaehlt")
+                             "No polygon selected")
+
+    def _draw_fps_overlay(self, painter: QPainter) -> None:
+        """Zeichne FPS-Overlay oben rechts im Canvas-Bereich."""
+        self._fps_frame_count += 1
+        now = time.monotonic()
+        elapsed = now - self._fps_last_time
+        if elapsed >= 1.0:
+            self._fps_value = self._fps_frame_count / elapsed
+            self._fps_frame_count = 0
+            self._fps_last_time = now
+
+        cx, cy, cw, ch = self._calc_canvas_rect()
+        text = f"FPS: {self._fps_value:.0f}"
+        font = QFont("Monospace", 10, QFont.Weight.Bold)
+        painter.setFont(font)
+        fm = painter.fontMetrics()
+        tw = fm.horizontalAdvance(text) + 10
+        th = fm.height() + 6
+
+        x = cx + cw - tw - 6
+        y = cy + 6
+        painter.setClipping(False)
+        painter.fillRect(x, y, tw, th, QColor(0, 0, 0, 160))
+        painter.setPen(QColor(0, 255, 80))
+        painter.drawText(x + 5, y + fm.ascent() + 3, text)
 
     def _draw_composite_preview(self, painter: QPainter) -> None:
         """Zeichne Composite-Preview - optimiert mit Buffer-Reuse."""
@@ -646,25 +782,83 @@ class PolygonCanvas(QWidget):
 
         if polygons_data:
             composite = composite_polygons_fast(polygons_data, (render_w, render_h), self._render_buffer)
+
+            # Crossfade: "from" State live re-rendern mit aktuellen Video-Frames
+            if self._crossfade_from_data is not None:
+                if self._crossfade_buffer_size != (render_w, render_h):
+                    self._crossfade_buffer = np.zeros((render_h, render_w, 3), dtype=np.uint8)
+                    self._crossfade_buffer_size = (render_w, render_h)
+
+                from_polygons = []
+                for media_id, src_pts, out_pts in self._crossfade_from_data:
+                    image = self.all_images.get(media_id)
+                    if image is not None:
+                        from_polygons.append((image, src_pts, out_pts))
+
+                if from_polygons:
+                    from_composite = composite_polygons_fast(
+                        from_polygons, (render_w, render_h), self._crossfade_buffer)
+                else:
+                    self._crossfade_buffer[:] = 0
+                    from_composite = self._crossfade_buffer
+
+                composite = cv2.addWeighted(
+                    from_composite, self._crossfade_from_alpha,
+                    composite, self._crossfade_to_alpha, 0)
+
             qimg = numpy_to_qimage(composite)
             if qimg:
                 img_x = cx + int(-self.pan_offset[0] * cw) + int((cw - render_w) / 2)
                 img_y = cy + int(-self.pan_offset[1] * ch) + int((ch - render_h) / 2)
                 painter.drawImage(img_x, img_y, qimg)
+        elif self._crossfade_from_data is not None:
+            # Kein neuer Content, aber From-Data vorhanden -> From-State ausblenden
+            if self._crossfade_buffer_size != (render_w, render_h):
+                self._crossfade_buffer = np.zeros((render_h, render_w, 3), dtype=np.uint8)
+                self._crossfade_buffer_size = (render_w, render_h)
+
+            from_polygons = []
+            for media_id, src_pts, out_pts in self._crossfade_from_data:
+                image = self.all_images.get(media_id)
+                if image is not None:
+                    from_polygons.append((image, src_pts, out_pts))
+
+            if from_polygons:
+                from_composite = composite_polygons_fast(
+                    from_polygons, (render_w, render_h), self._crossfade_buffer)
+                faded = cv2.multiply(from_composite, np.array([self._crossfade_from_alpha]))
+                faded = np.clip(faded, 0, 255).astype(np.uint8)
+                qimg = numpy_to_qimage(faded)
+                if qimg:
+                    img_x = cx + int(-self.pan_offset[0] * cw) + int((cw - render_w) / 2)
+                    img_y = cy + int(-self.pan_offset[1] * ch) + int((ch - render_h) / 2)
+                    painter.drawImage(img_x, img_y, qimg)
 
     def _draw_all_polygons(self, painter: QPainter) -> None:
-        """Zeichne alle Polygone."""
-        # Zuerst nicht-aktive Polygone (grau)
+        """Zeichne alle Polygone in drei Stufen."""
+        selected_set = set(id(p) for p in self.selected_polygons)
+
+        # 1. Nicht-selektiert, nicht-aktuell -> grau
         for poly in self.all_polygons:
             if poly == self.current_polygon:
                 continue
-            self._draw_polygon(painter, poly, is_current=False)
+            if id(poly) in selected_set:
+                continue
+            self._draw_polygon(painter, poly, is_current=False, is_selected=False)
 
-        # Dann aktuelles Polygon
+        # 2. Selektiert aber nicht primary -> orange
+        for poly in self.selected_polygons:
+            if poly == self.current_polygon:
+                continue
+            if poly in self.all_polygons:
+                self._draw_polygon(painter, poly, is_current=False, is_selected=True)
+
+        # 3. Primary (current_polygon) -> blau mit Handles
         if self.current_polygon:
-            self._draw_polygon(painter, self.current_polygon, is_current=True)
+            self._draw_polygon(painter, self.current_polygon, is_current=True, is_selected=True)
 
-    def _draw_polygon(self, painter: QPainter, polygon: Polygon, is_current: bool) -> None:
+    def _draw_polygon(self, painter: QPainter, polygon: Polygon,
+                      is_current: bool, is_selected: bool = False) -> None:
         """Zeichne ein einzelnes Polygon mit Punkten und Kanten."""
         if self.mode == "source":
             points = polygon.source_points
@@ -687,6 +881,8 @@ class PolygonCanvas(QWidget):
         # Gefuelltes Polygon (halbtransparent)
         if is_current:
             painter.setBrush(QBrush(QColor(0, 150, 255, 40)))
+        elif is_selected:
+            painter.setBrush(QBrush(QColor(255, 180, 0, 40)))
         else:
             painter.setBrush(QBrush(QColor(100, 100, 100, 25)))
         painter.setPen(Qt.PenStyle.NoPen)
@@ -696,6 +892,8 @@ class PolygonCanvas(QWidget):
         # Kanten
         if is_current:
             painter.setPen(QPen(QColor(0, 200, 255), 2))
+        elif is_selected:
+            painter.setPen(QPen(QColor(255, 180, 0), 2))
         else:
             painter.setPen(QPen(QColor(150, 150, 150), 1))
 
@@ -705,14 +903,21 @@ class PolygonCanvas(QWidget):
             painter.drawLine(p1[0], p1[1], p2[0], p2[1])
 
         # Punkte und Handles
+        poly_locked = polygon.locked if hasattr(polygon, 'locked') else False
+
         if is_current:
             # Eck-Punkte mit Nummern
             for i, (px, py) in enumerate(pixel_points):
                 is_hovered = (self.hovered_handle == HandleType.POINT and self.hovered_corner == i)
-                is_selected = (i == self.selected_point)
+                is_selected_pt = (i == self.selected_point)
                 is_active = (self.active_handle == HandleType.POINT and self.active_corner == i)
 
-                if is_selected or is_active:
+                if poly_locked:
+                    # Gesperrte Punkte: grau
+                    painter.setBrush(QBrush(QColor(120, 120, 120)))
+                    painter.setPen(QPen(QColor(180, 180, 180), 2))
+                    radius = self.point_radius
+                elif is_selected_pt or is_active:
                     painter.setBrush(QBrush(QColor(255, 80, 80)))
                     painter.setPen(QPen(QColor(255, 255, 255), 3))
                     radius = self.point_radius + 4
@@ -751,6 +956,13 @@ class PolygonCanvas(QWidget):
             painter.drawLine(cx - cross_size, cy, cx + cross_size, cy)
             painter.drawLine(cx, cy - cross_size, cx, cy + cross_size)
 
+            # Lock-Icon neben Center Handle
+            if poly_locked:
+                lock_font = QFont("sans-serif", 12)
+                painter.setFont(lock_font)
+                painter.setPen(QColor(255, 200, 80))
+                painter.drawText(cx + self.handle_radius + 4, cy + 5, "\U0001f512")
+
             # Rotation Handle
             rx, ry = self._get_rotation_handle_pos(points)
             is_rotate_hovered = self.hovered_handle == HandleType.ROTATE
@@ -780,16 +992,25 @@ class PolygonCanvas(QWidget):
 
         else:
             # Nicht-aktuelles Polygon: Kleine Punkte
+            if is_selected:
+                dot_brush = QBrush(QColor(255, 180, 0))
+                dot_pen = QPen(QColor(255, 220, 100), 1)
+            else:
+                dot_brush = QBrush(QColor(150, 150, 150))
+                dot_pen = QPen(QColor(200, 200, 200), 1)
             for px, py in pixel_points:
-                painter.setBrush(QBrush(QColor(150, 150, 150)))
-                painter.setPen(QPen(QColor(200, 200, 200), 1))
+                painter.setBrush(dot_brush)
+                painter.setPen(dot_pen)
                 painter.drawEllipse(QPoint(px, py), 5, 5)
 
             # Name in der Mitte
             if pixel_points:
                 center_x = sum(p[0] for p in pixel_points) // len(pixel_points)
                 center_y = sum(p[1] for p in pixel_points) // len(pixel_points)
-                painter.setPen(QColor(180, 180, 180))
+                if is_selected:
+                    painter.setPen(QColor(255, 200, 80))
+                else:
+                    painter.setPen(QColor(180, 180, 180))
                 painter.drawText(center_x - 20, center_y, polygon.name)
 
     def _is_inside_shape(self, x: int, y: int) -> bool:
@@ -826,11 +1047,35 @@ class PolygonCanvas(QWidget):
         if event.button() == Qt.MouseButton.LeftButton:
             x, y = int(event.position().x()), int(event.position().y())
 
-            # Shift-Taste pruefen fuer Aspect Ratio Lock
-            self.maintain_aspect_ratio = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+            # Modifier pruefen
+            shift_held = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+            self.maintain_aspect_ratio = False  # Wird unten ggf. gesetzt
+
+            # Bei Shift: Pruefen ob anderes Polygon angeklickt (Multi-Select)
+            if shift_held:
+                poly = self._find_polygon_at(x, y)
+                if poly is not None and poly != self.current_polygon:
+                    self.polygon_selected.emit(poly, int(event.modifiers().value))
+                    self.active_handle = HandleType.NONE
+                    self.active_corner = -1
+                    self.selected_point = None
+                    self.dragging = False
+                    self.dragging_shape = False
+                    self.update()
+                    return
+                # Shift auf aktuellem Polygon -> Aspect Ratio Lock fuer Drag
+                self.maintain_aspect_ratio = True
 
             # Handle finden
             handle_type, corner = self._find_handle_at(x, y)
+
+            # Lock-Enforcement: Bei gesperrtem Polygon POINT ohne Shift -> CENTER
+            if (handle_type == HandleType.POINT
+                    and self.current_polygon
+                    and self.current_polygon.locked
+                    and not shift_held):
+                handle_type = HandleType.CENTER
+                corner = -1
 
             if handle_type != HandleType.NONE and self.current_polygon:
                 points = self.get_points()
@@ -845,6 +1090,13 @@ class PolygonCanvas(QWidget):
                     cx, cy = self.drag_start_center
                     nx, ny = self._pixel_to_norm(x, y)
                     self.drag_start_angle = math.atan2(ny - cy, nx - cx)
+
+                # Multi-Drag Snapshot
+                if len(self.selected_polygons) > 1 and handle_type in (HandleType.CENTER, HandleType.ROTATE, HandleType.POINT):
+                    self._multi_drag_start = {}
+                    for poly in self.selected_polygons:
+                        pts = poly.source_points if self.mode == "source" else poly.output_points
+                        self._multi_drag_start[poly.id] = [p.copy() for p in pts]
 
                 if handle_type == HandleType.POINT:
                     self.selected_point = corner
@@ -861,9 +1113,9 @@ class PolygonCanvas(QWidget):
             else:
                 # Pruefen ob anderes Polygon angeklickt wurde
                 poly = self._find_polygon_at(x, y)
-                if poly is not None and poly != self.current_polygon:
-                    # Anderes Polygon auswaehlen - Signal senden
-                    self.polygon_selected.emit(poly)
+                if poly is not None:
+                    # Polygon auswaehlen - Signal senden
+                    self.polygon_selected.emit(poly, int(event.modifiers().value))
                 self.active_handle = HandleType.NONE
                 self.active_corner = -1
                 self.selected_point = None
@@ -895,28 +1147,62 @@ class PolygonCanvas(QWidget):
         if self.active_handle != HandleType.NONE and self.current_polygon and self.drag_start_points:
             if self.active_handle == HandleType.POINT:
                 if self.maintain_aspect_ratio and self.drag_start_center:
-                    # Shift gedrueckt: Uniform scaling vom Zentrum
-                    cx, cy = self.drag_start_center
+                    # Shift gedrueckt: Uniform scaling
+                    alt_held = bool(event.modifiers() & Qt.KeyboardModifier.AltModifier)
                     orig_corner = self.drag_start_points[self.active_corner]
 
-                    # Urspruengliche Distanz zum Zentrum
-                    orig_dist = math.sqrt((orig_corner[0] - cx) ** 2 + (orig_corner[1] - cy) ** 2)
-                    if orig_dist > 0.001:
-                        # Neue Distanz zum Zentrum
-                        new_dist = math.sqrt((nx - cx) ** 2 + (ny - cy) ** 2)
-                        scale = new_dist / orig_dist
+                    if self._multi_drag_start and len(self.selected_polygons) > 1 and not alt_held:
+                        # Multi-Select: Alle Polygone um gemeinsamen Mittelpunkt skalieren
+                        all_start_pts = []
+                        for pts in self._multi_drag_start.values():
+                            all_start_pts.extend(pts)
+                        shared_cx = sum(p[0] for p in all_start_pts) / len(all_start_pts)
+                        shared_cy = sum(p[1] for p in all_start_pts) / len(all_start_pts)
 
-                        # Alle Punkte skalieren
-                        new_points = self._scale_points(self.drag_start_points, (cx, cy), scale, scale)
+                        orig_dist = math.sqrt((orig_corner[0] - shared_cx) ** 2 + (orig_corner[1] - shared_cy) ** 2)
+                        if orig_dist > 0.001:
+                            new_dist = math.sqrt((nx - shared_cx) ** 2 + (ny - shared_cy) ** 2)
+                            scale = new_dist / orig_dist
 
-                        if self.mode == "source":
-                            self.current_polygon.source_points = new_points
-                        else:
-                            self.current_polygon.output_points = new_points
+                            for poly in self.selected_polygons:
+                                start_pts = self._multi_drag_start.get(poly.id)
+                                if not start_pts:
+                                    continue
+                                scaled = self._scale_points(start_pts, (shared_cx, shared_cy), scale, scale)
+                                if self.mode == "source":
+                                    poly.source_points = scaled
+                                else:
+                                    poly.output_points = scaled
+                    else:
+                        # Einzelnes Polygon oder Alt: Jedes Polygon um eigenen Mittelpunkt
+                        cx, cy = self.drag_start_center
+                        orig_dist = math.sqrt((orig_corner[0] - cx) ** 2 + (orig_corner[1] - cy) ** 2)
+                        if orig_dist > 0.001:
+                            new_dist = math.sqrt((nx - cx) ** 2 + (ny - cy) ** 2)
+                            scale = new_dist / orig_dist
+
+                            new_points = self._scale_points(self.drag_start_points, (cx, cy), scale, scale)
+                            if self.mode == "source":
+                                self.current_polygon.source_points = new_points
+                            else:
+                                self.current_polygon.output_points = new_points
+
+                            # Alt + Multi-Select: Andere Polygone um ihren eigenen Mittelpunkt
+                            if self._multi_drag_start and alt_held:
+                                for poly in self.selected_polygons:
+                                    if poly == self.current_polygon:
+                                        continue
+                                    start_pts = self._multi_drag_start.get(poly.id)
+                                    if not start_pts:
+                                        continue
+                                    poly_center = self._get_polygon_center(start_pts)
+                                    scaled = self._scale_points(start_pts, poly_center, scale, scale)
+                                    if self.mode == "source":
+                                        poly.source_points = scaled
+                                    else:
+                                        poly.output_points = scaled
                 else:
                     # Einzelnen Punkt verschieben
-                    nx = max(0.0, min(1.0, nx))
-                    ny = max(0.0, min(1.0, ny))
                     nx, ny = self._apply_snapping(nx, ny)
 
                     if self.mode == "source":
@@ -930,37 +1216,76 @@ class PolygonCanvas(QWidget):
                 dx = nx - start_nx
                 dy = ny - start_ny
 
-                new_points = []
-                for px, py in self.drag_start_points:
-                    new_x = max(0.0, min(1.0, px + dx))
-                    new_y = max(0.0, min(1.0, py + dy))
-                    new_points.append([new_x, new_y])
+                new_points = [[px + dx, py + dy] for px, py in self.drag_start_points]
 
                 # Shape-Snapping anwenden
                 new_points = self._apply_shape_snapping(new_points)
 
+                # Berechne effektiven Delta nach Snapping
+                eff_dx = new_points[0][0] - self.drag_start_points[0][0]
+                eff_dy = new_points[0][1] - self.drag_start_points[0][1]
+
                 if self.mode == "source":
                     self.current_polygon.source_points = new_points
                 else:
                     self.current_polygon.output_points = new_points
+
+                # Multi-Polygon verschieben
+                if self._multi_drag_start:
+                    for poly in self.selected_polygons:
+                        if poly == self.current_polygon:
+                            continue
+                        start_pts = self._multi_drag_start.get(poly.id)
+                        if not start_pts:
+                            continue
+                        moved = [[p[0] + eff_dx, p[1] + eff_dy] for p in start_pts]
+                        if self.mode == "source":
+                            poly.source_points = moved
+                        else:
+                            poly.output_points = moved
 
             elif self.active_handle == HandleType.ROTATE:
                 # Rotation um Zentrum
-                cx, cy = self.drag_start_center
-                current_angle = math.atan2(ny - cy, nx - cx)
-                delta_angle = current_angle - self.drag_start_angle
+                if self._multi_drag_start and len(self.selected_polygons) > 1:
+                    # Shared Center = Durchschnitt aller Start-Punkte
+                    all_pts = []
+                    for pts in self._multi_drag_start.values():
+                        all_pts.extend(pts)
+                    shared_cx = sum(p[0] for p in all_pts) / len(all_pts)
+                    shared_cy = sum(p[1] for p in all_pts) / len(all_pts)
 
-                new_points = []
-                for px, py in self.drag_start_points:
-                    new_x, new_y = self._rotate_point(px, py, cx, cy, delta_angle)
-                    new_x = max(0.0, min(1.0, new_x))
-                    new_y = max(0.0, min(1.0, new_y))
-                    new_points.append([new_x, new_y])
+                    current_angle = math.atan2(ny - shared_cy, nx - shared_cx)
+                    # Recalculate start angle relative to shared center
+                    start_nx, start_ny = self.drag_start
+                    start_angle = math.atan2(start_ny - shared_cy, start_nx - shared_cx)
+                    delta_angle = current_angle - start_angle
 
-                if self.mode == "source":
-                    self.current_polygon.source_points = new_points
+                    for poly in self.selected_polygons:
+                        start_pts = self._multi_drag_start.get(poly.id)
+                        if not start_pts:
+                            continue
+                        new_pts = []
+                        for px, py in start_pts:
+                            rx, ry = self._rotate_point(px, py, shared_cx, shared_cy, delta_angle)
+                            new_pts.append([rx, ry])
+                        if self.mode == "source":
+                            poly.source_points = new_pts
+                        else:
+                            poly.output_points = new_pts
                 else:
-                    self.current_polygon.output_points = new_points
+                    cx, cy = self.drag_start_center
+                    current_angle = math.atan2(ny - cy, nx - cx)
+                    delta_angle = current_angle - self.drag_start_angle
+
+                    new_points = []
+                    for px, py in self.drag_start_points:
+                        new_x, new_y = self._rotate_point(px, py, cx, cy, delta_angle)
+                        new_points.append([new_x, new_y])
+
+                    if self.mode == "source":
+                        self.current_polygon.source_points = new_points
+                    else:
+                        self.current_polygon.output_points = new_points
 
             self.update()
             self.points_changed.emit()
@@ -986,6 +1311,39 @@ class PolygonCanvas(QWidget):
             return
 
         if event.button() == Qt.MouseButton.LeftButton:
+            # Undo-Command pushen wenn Punkte sich geaendert haben
+            if self.drag_start_points and self.current_polygon and self._undo_stack:
+                current_pts = self.get_points()
+                changed = (self.drag_start_points != current_pts)
+                if changed:
+                    from .undo_commands import PointsMoveCommand, MultiPointsMoveCommand
+
+                    if self._multi_drag_start and len(self.selected_polygons) > 1:
+                        # Multi-Select: Eintraege fuer jedes veraenderte Polygon
+                        entries = []
+                        for poly in self.selected_polygons:
+                            old_pts = self._multi_drag_start.get(poly.id)
+                            if not old_pts:
+                                continue
+                            cur = poly.source_points if self.mode == "source" else poly.output_points
+                            if old_pts != cur:
+                                entries.append((poly, self.mode,
+                                                [p.copy() for p in old_pts],
+                                                [p.copy() for p in cur]))
+                        if entries:
+                            cmd = MultiPointsMoveCommand(entries, self._refresh_cb or (lambda: None),
+                                                         "Move polygons")
+                            self._undo_stack.push(cmd)
+                    else:
+                        # Single-Select
+                        cmd = PointsMoveCommand(
+                            self.current_polygon, self.mode,
+                            [p.copy() for p in self.drag_start_points],
+                            [p.copy() for p in current_pts],
+                            self._refresh_cb or (lambda: None),
+                            "Move points")
+                        self._undo_stack.push(cmd)
+
             self.dragging = False
             self.dragging_shape = False
             self.drag_start = None
@@ -994,6 +1352,7 @@ class PolygonCanvas(QWidget):
             self.drag_start_points = None
             self.drag_start_center = None
             self.drag_start_angle = 0.0
+            self._multi_drag_start = None
 
             # Cursor zuruecksetzen auf Hover-Status
             x, y = int(event.position().x()), int(event.position().y())
@@ -1043,10 +1402,12 @@ class PolygonCanvas(QWidget):
     def keyPressEvent(self, event: QKeyEvent) -> None:
         """Pfeiltasten: Punkt oder ganzes Polygon verschieben. Shift = fein."""
         if not self.current_polygon:
+            event.ignore()
             return
 
         key = event.key()
         if key not in (Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Up, Qt.Key.Key_Down):
+            event.ignore()
             return
 
         # Shift = fein, normal = grob
@@ -1067,34 +1428,173 @@ class PolygonCanvas(QWidget):
 
         points = self.get_points()
         if not points:
+            event.ignore()
             return
 
-        if self.selected_point is not None and self.selected_point < len(points):
-            # Einzelnen Punkt verschieben
+        # Snapshot vor Aenderung
+        old_points = [p.copy() for p in points]
+
+        if (self.selected_point is not None and self.selected_point < len(points)
+                and not self.current_polygon.locked):
+            # Einzelnen Punkt verschieben (nur wenn nicht gesperrt)
             px, py = points[self.selected_point]
-            points[self.selected_point] = [
-                max(0.0, min(1.0, px + dx)),
-                max(0.0, min(1.0, py + dy))
-            ]
+            points[self.selected_point] = [px + dx, py + dy]
+        elif len(self.selected_polygons) > 1:
+            # Multi-Select: Alle selektierten Polygone verschieben
+            from .undo_commands import MultiPointsMoveCommand
+            entries = []
+            for poly in self.selected_polygons:
+                pts = poly.source_points if self.mode == "source" else poly.output_points
+                old_pts = [p.copy() for p in pts]
+                new_pts = [[p[0] + dx, p[1] + dy] for p in pts]
+                if self.mode == "source":
+                    poly.source_points = new_pts
+                else:
+                    poly.output_points = new_pts
+                entries.append((poly, self.mode, old_pts, [p.copy() for p in new_pts]))
+            if entries and self._undo_stack:
+                cmd = MultiPointsMoveCommand(entries, self._refresh_cb or (lambda: None), "Arrow move polygons")
+                self._undo_stack.push(cmd)
+            self.update()
+            self.points_changed.emit()
+            return
         else:
             # Ganzes Polygon verschieben
-            new_points = [
-                [max(0.0, min(1.0, p[0] + dx)), max(0.0, min(1.0, p[1] + dy))]
-                for p in points
-            ]
+            new_points = [[p[0] + dx, p[1] + dy] for p in points]
             if self.mode == "source":
                 self.current_polygon.source_points = new_points
             else:
                 self.current_polygon.output_points = new_points
 
+        # Undo-Command pushen (single polygon)
+        if self._undo_stack:
+            from .undo_commands import PointsMoveCommand
+            new_pts = self.get_points()
+            if old_points != new_pts:
+                cmd = PointsMoveCommand(
+                    self.current_polygon, self.mode,
+                    old_points, [p.copy() for p in new_pts],
+                    self._refresh_cb or (lambda: None), "Arrow move")
+                self._undo_stack.push(cmd)
+
         self.update()
         self.points_changed.emit()
 
     def resizeEvent(self, event) -> None:
-        """Positioniere Fit-Button unten rechts."""
+        """Positioniere Overlay-Buttons unten rechts."""
         super().resizeEvent(event)
         margin = 6
+        gap = 4
+        btn_y = self.height() - self._fit_btn.height() - margin
+        # Fit-Button ganz rechts
         self._fit_btn.move(
             self.width() - self._fit_btn.width() - margin,
-            self.height() - self._fit_btn.height() - margin
+            btn_y
         )
+        # Reset-Button links daneben
+        self._reset_btn.move(
+            self.width() - self._fit_btn.width() - margin - gap - self._reset_btn.width(),
+            btn_y
+        )
+
+    def contextMenuEvent(self, event) -> None:
+        """Rechtsklick-Kontextmenue fuer Polygone (nur Source-Canvas)."""
+        if self.mode != "source":
+            return
+
+        x, y = int(event.pos().x()), int(event.pos().y())
+        poly = self._find_polygon_at(x, y)
+        if poly is None:
+            return
+
+        # Falls nicht aktuelles Polygon -> zuerst selektieren
+        if poly != self.current_polygon:
+            self.polygon_selected.emit(poly, 0)
+
+        menu = QMenu(self)
+
+        # Lock / Unlock Toggle
+        if poly.locked:
+            lock_action = menu.addAction("Unlock")
+        else:
+            lock_action = menu.addAction("Lock")
+
+        menu.addSeparator()
+
+        # Edit Shape
+        edit_shape_action = menu.addAction("Edit Shape...")
+
+        action = menu.exec(event.globalPos())
+        if action is None:
+            return
+
+        if action == lock_action:
+            self._toggle_lock(poly)
+        elif action == edit_shape_action:
+            self._open_shape_dialog(poly)
+
+    def _toggle_lock(self, polygon: Polygon) -> None:
+        """Lock/Unlock Toggle mit Undo."""
+        old_val = polygon.locked
+        new_val = not old_val
+
+        if self._undo_stack:
+            from .undo_commands import PolygonPropertyCommand
+            cmd = PolygonPropertyCommand(
+                polygon, 'locked', old_val, new_val,
+                self._refresh_cb or (lambda: None),
+                "Lock polygon" if new_val else "Unlock polygon")
+            self._undo_stack.push(cmd)
+        else:
+            polygon.locked = new_val
+
+        self.update()
+
+    def _open_shape_dialog(self, polygon: Polygon) -> None:
+        """Oeffne den Edit Shape Dialog."""
+        from .shape_dialog import ShapeDialog
+
+        dlg = ShapeDialog(polygon, self)
+        if dlg.exec() != ShapeDialog.DialogCode.Accepted:
+            return
+
+        new_points, constraints, auto_lock = dlg.get_result()
+        if new_points is None:
+            return
+
+        old_points = [p.copy() for p in polygon.source_points]
+        old_constraints = polygon.shape_constraints
+        old_locked = polygon.locked
+
+        if self._undo_stack:
+            from .undo_commands import PointsMoveCommand, PolygonPropertyCommand
+            self._undo_stack.beginMacro("Edit Shape")
+
+            # Punkte aendern
+            cmd_pts = PointsMoveCommand(
+                polygon, "source", old_points, [p.copy() for p in new_points],
+                self._refresh_cb or (lambda: None), "Shape points")
+            self._undo_stack.push(cmd_pts)
+
+            # Constraints speichern
+            cmd_constraints = PolygonPropertyCommand(
+                polygon, 'shape_constraints', old_constraints, constraints,
+                self._refresh_cb or (lambda: None), "Shape constraints")
+            self._undo_stack.push(cmd_constraints)
+
+            # Auto-Lock
+            if auto_lock and not old_locked:
+                cmd_lock = PolygonPropertyCommand(
+                    polygon, 'locked', False, True,
+                    self._refresh_cb or (lambda: None), "Auto-lock")
+                self._undo_stack.push(cmd_lock)
+
+            self._undo_stack.endMacro()
+        else:
+            polygon.source_points = new_points
+            polygon.shape_constraints = constraints
+            if auto_lock:
+                polygon.locked = True
+
+        self.update()
+        self.points_changed.emit()

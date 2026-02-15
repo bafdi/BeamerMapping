@@ -172,6 +172,15 @@ Projekt
 - [ ] Laden
 - [ ] Auto-Save
 
+### F8: Renderer & Performance
+- [x] OpenCV-Backend (CPU, Standard)
+- [x] OpenGL-Backend (GPU, via moderngl)
+- [x] Backend-Umschaltung zur Laufzeit (Preferences-Dialog)
+- [x] Automatischer Fallback OpenGL → OpenCV bei Fehler
+- [x] FPS-Counter im Output-Canvas
+- [x] FPS-Counter im Output-Fenster
+- [x] Einstellungen persistent via QSettings
+
 ---
 
 ## Keyboard Shortcuts
@@ -180,6 +189,7 @@ Projekt
 |----------|--------|
 | `Ctrl+S` | Speichern |
 | `Ctrl+O` | Oeffnen |
+| `Ctrl+,` | Einstellungen (Renderer, FPS) |
 | `Delete` | Ausgewaehltes loeschen |
 | `F5` | Output-Fenster |
 | `F11` | Fullscreen |
@@ -212,3 +222,8 @@ Projekt
 ### Phase 3:
 10. Seitenlaengen/Winkel fuer Output
 11. Video-Playback
+
+### Phase 4 (erledigt):
+12. GPU-Renderer (OpenGL via moderngl)
+13. Settings-Dialog
+14. FPS-Anzeige

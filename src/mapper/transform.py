@@ -1,9 +1,30 @@
 """Hochoptimierte Bild-Transformation mit Homographie und Caching."""
 
+import logging
 from typing import List, Tuple, Optional, Dict
 from functools import lru_cache
 import cv2
 import numpy as np
+
+logger = logging.getLogger(__name__)
+
+# --- Renderer Backend Dispatch ---
+_renderer_backend = "opencv"
+_gl_compositor = None  # Lazy singleton
+
+
+def set_renderer_backend(backend: str) -> None:
+    """Setze Renderer-Backend ('opencv' oder 'opengl')."""
+    global _renderer_backend
+    if backend not in ("opencv", "opengl"):
+        raise ValueError(f"Unbekanntes Backend: {backend}")
+    _renderer_backend = backend
+    logger.info(f"Renderer-Backend: {backend}")
+
+
+def get_renderer_backend() -> str:
+    """Hole aktuelles Renderer-Backend."""
+    return _renderer_backend
 
 # Pre-allocated arrays fuer haeufige Operationen (Thread-local wuerde hier helfen bei Multi-Threading)
 _POINT_BUFFER_SRC = np.zeros((4, 2), dtype=np.float32)
@@ -163,14 +184,14 @@ def composite_polygons(
     return result
 
 
-def composite_polygons_fast(
+def _composite_opencv(
     polygons_data: List[Tuple[np.ndarray, List[List[float]], List[List[float]]]],
     output_size: Tuple[int, int],
     result_buffer: Optional[np.ndarray] = None
 ) -> np.ndarray:
     """
+    CPU-basiertes Compositing mit OpenCV.
     Noch schnellere Version mit externem Buffer (vermeidet Allocation).
-    Fuer Echtzeit-Rendering wo derselbe Buffer wiederverwendet wird.
     """
     out_w, out_h = output_size
 
@@ -210,6 +231,40 @@ def composite_polygons_fast(
         np.copyto(result, warped, where=mask[:, :, np.newaxis] > 0)
 
     return result
+
+
+def _composite_opengl(
+    polygons_data: List[Tuple[np.ndarray, List[List[float]], List[List[float]]]],
+    output_size: Tuple[int, int],
+    result_buffer: Optional[np.ndarray] = None
+) -> Optional[np.ndarray]:
+    """GPU-basiertes Compositing mit OpenGL. Returns None bei Fehler."""
+    global _gl_compositor
+
+    if _gl_compositor is None:
+        from .gl_renderer import GLCompositor
+        _gl_compositor = GLCompositor()
+
+    return _gl_compositor.composite(polygons_data, output_size, result_buffer)
+
+
+def composite_polygons_fast(
+    polygons_data: List[Tuple[np.ndarray, List[List[float]], List[List[float]]]],
+    output_size: Tuple[int, int],
+    result_buffer: Optional[np.ndarray] = None
+) -> np.ndarray:
+    """
+    Dispatch-Funktion: Waehlt Backend basierend auf Einstellung.
+    Faellt bei OpenGL-Fehler automatisch auf OpenCV zurueck.
+    """
+    if _renderer_backend == "opengl":
+        result = _composite_opengl(polygons_data, output_size, result_buffer)
+        if result is not None:
+            return result
+        # Fallback auf OpenCV
+        logger.warning("OpenGL Fallback -> OpenCV")
+
+    return _composite_opencv(polygons_data, output_size, result_buffer)
 
 
 # Gecachte QImage-Konvertierung

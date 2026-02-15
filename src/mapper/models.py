@@ -90,12 +90,14 @@ class QueueTransition:
     mode: str = "instant"  # "instant", "dissolve", "fade"
     duration_ms: int = 500
     easing: str = "linear"  # "linear", "ease-in", "ease-out", "ease-in-out"
+    overlap: float = 0.5  # 0.0=dip-to-black, 0.5=standard crossfade, 1.0=additiv
 
     def to_dict(self) -> Dict[str, Any]:
         return {
             'mode': self.mode,
             'duration_ms': self.duration_ms,
             'easing': self.easing,
+            'overlap': self.overlap,
         }
 
     @classmethod
@@ -104,6 +106,7 @@ class QueueTransition:
             mode=data.get('mode', 'instant'),
             duration_ms=data.get('duration_ms', 500),
             easing=data.get('easing', 'linear'),
+            overlap=data.get('overlap', 0.5),
         )
 
 
@@ -178,15 +181,25 @@ class Polygon:
         [0.1, 0.1], [0.9, 0.1], [0.9, 0.9], [0.1, 0.9]
     ])
 
+    # Shape Lock
+    locked: bool = False
+    shape_constraints: Optional[Dict[str, Any]] = None
+    # Format: {'side_lengths': [float×4], 'angles': [float×4],
+    #          'orientations': [str|None×4]}
+
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        d = {
             'id': self.id,
             'name': self.name,
             'media_layer_id': self.media_layer_id,
             'output_layer_id': self.output_layer_id,
             'source_points': self.source_points,
             'output_points': self.output_points,
+            'locked': self.locked,
         }
+        if self.shape_constraints is not None:
+            d['shape_constraints'] = self.shape_constraints
+        return d
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> Polygon:
@@ -197,7 +210,15 @@ class Polygon:
             output_layer_id=data.get('output_layer_id'),
             source_points=data.get('source_points', [[0.1, 0.1], [0.9, 0.1], [0.9, 0.9], [0.1, 0.9]]),
             output_points=data.get('output_points', [[0.1, 0.1], [0.9, 0.1], [0.9, 0.9], [0.1, 0.9]]),
+            locked=data.get('locked', False),
+            shape_constraints=data.get('shape_constraints'),
         )
+
+    def snapshot_source(self) -> List[List[float]]:
+        return [p.copy() for p in self.source_points]
+
+    def snapshot_output(self) -> List[List[float]]:
+        return [p.copy() for p in self.output_points]
 
     def copy(self) -> Polygon:
         """Erstelle eine Kopie des Polygons."""
@@ -208,6 +229,8 @@ class Polygon:
             output_layer_id=self.output_layer_id,
             source_points=[p.copy() for p in self.source_points],
             output_points=[p.copy() for p in self.output_points],
+            locked=self.locked,
+            shape_constraints=dict(self.shape_constraints) if self.shape_constraints else None,
         )
 
 

@@ -1,12 +1,14 @@
 """Output-Fenster fuer Projektor - Performance-optimiert."""
 
+import time
 from typing import Optional, Dict, List
+import cv2
 import numpy as np
 
 from PyQt6.QtCore import Qt, QPoint, pyqtSignal
 from PyQt6.QtGui import (
     QPainter, QPen, QBrush, QColor, QKeyEvent,
-    QMouseEvent, QPaintEvent, QImage
+    QMouseEvent, QPaintEvent, QImage, QFont
 )
 from PyQt6.QtWidgets import QWidget
 
@@ -52,9 +54,28 @@ class OutputWindow(QWidget):
         self.setMouseTracking(True)
         self.setCursor(Qt.CursorShape.BlankCursor)
 
+        # FPS Counter
+        self._show_fps = False
+        self._fps_frame_count = 0
+        self._fps_last_time = time.monotonic()
+        self._fps_value = 0.0
+
         # Performance: Reusable render buffer
         self._render_buffer: Optional[np.ndarray] = None
         self._last_size: tuple = (0, 0)
+
+        # Crossfade state: Live-Rendering statt statischer Snapshot
+        # Speichert Polygon-Daten (media_id, source_pts, output_pts) des "from"-State
+        self._crossfade_from_data: Optional[List[tuple]] = None
+        self._crossfade_from_alpha: float = 1.0
+        self._crossfade_to_alpha: float = 0.0
+        self._crossfade_buffer: Optional[np.ndarray] = None
+        self._crossfade_buffer_size: tuple = (0, 0)
+
+        # Freeze / Blackout
+        self._frozen_frame: Optional[np.ndarray] = None
+        self._blackout: bool = False
+        self._fb_alpha: float = 0.0  # 0.0=live, 1.0=voll eingefroren/schwarz
 
     def set_output_layer(self, output_layer: OutputLayer) -> None:
         """Setze den Output Layer."""
@@ -84,6 +105,14 @@ class OutputWindow(QWidget):
     def set_image_for_media(self, media_id: str, image: np.ndarray) -> None:
         """Legacy: Setze ein Bild fuer eine Media-ID."""
         self.images[media_id] = image
+        self.update()
+
+    def set_show_fps(self, enabled: bool) -> None:
+        """Aktiviere/Deaktiviere FPS-Anzeige."""
+        self._show_fps = enabled
+        self._fps_frame_count = 0
+        self._fps_last_time = time.monotonic()
+        self._fps_value = 0.0
         self.update()
 
     def set_edit_mode(self, enabled: bool) -> None:
@@ -140,16 +169,91 @@ class OutputWindow(QWidget):
         # Schwarzer Hintergrund
         painter.fillRect(self.rect(), QColor(0, 0, 0))
 
-        # Alle Polygone rendern
         w, h = self.width(), self.height()
         if w > 0 and h > 0:
-            self._render_all_polygons(painter)
+            if self._blackout and self._fb_alpha >= 1.0:
+                # Voll-Blackout: schwarzer BG reicht
+                pass
+            elif self._frozen_frame is not None and self._fb_alpha >= 1.0:
+                # Voll-Freeze: nur frozen frame zeigen (spart Live-Rendering)
+                self._draw_frozen_frame(painter)
+            else:
+                # Live rendern (inkl. partiellem Fade-Blending)
+                self._render_all_polygons(painter)
 
         # Edit-Overlay nur wenn aktiviert
         if self.edit_mode:
             self._draw_edit_overlay(painter)
 
+        # FPS Overlay
+        if self._show_fps:
+            self._draw_fps_overlay(painter)
+
         painter.end()
+
+    def capture_crossfade_snapshot(self) -> None:
+        """Capture aktuellen Render-State fuer Live-Crossfade.
+
+        Speichert Polygon-Daten (media_id + Punkt-Kopien) statt eines
+        statischen Screenshots, damit laufende Videos im Crossfade
+        weiterlaufen koennen.
+        """
+        self._crossfade_from_data = []
+        for poly, image in self._get_all_polygons_with_images():
+            if image is not None and poly.media_layer_id:
+                media_layer = self.project.get_media_layer_by_id(poly.media_layer_id)
+                if media_layer and media_layer.media_id:
+                    self._crossfade_from_data.append((
+                        media_layer.media_id,
+                        [p.copy() for p in poly.source_points],
+                        [p.copy() for p in poly.output_points],
+                    ))
+
+    def set_crossfade_alphas(self, from_alpha: float, to_alpha: float) -> None:
+        """Setze Blend-Alphas fuer Crossfade."""
+        self._crossfade_from_alpha = from_alpha
+        self._crossfade_to_alpha = to_alpha
+        # From-Daten freigeben wenn Transition vorbei
+        if to_alpha >= 1.0 and from_alpha <= 0.0:
+            self._crossfade_from_data = None
+            self._crossfade_buffer = None
+
+    def set_freeze(self, enabled: bool) -> None:
+        """Freeze Output: aktuelles Frame einfrieren oder freigeben."""
+        if enabled:
+            w, h = self.width(), self.height()
+            if w > 0 and h > 0:
+                polygons_data = []
+                for poly, image in self._get_all_polygons_with_images():
+                    if image is not None:
+                        polygons_data.append((image, poly.source_points, poly.output_points))
+                if polygons_data:
+                    buffer = np.zeros((h, w, 3), dtype=np.uint8)
+                    self._frozen_frame = composite_polygons_fast(polygons_data, (w, h), buffer).copy()
+                else:
+                    self._frozen_frame = np.zeros((h, w, 3), dtype=np.uint8)
+        else:
+            self._frozen_frame = None
+        self.update()
+
+    def set_blackout(self, enabled: bool) -> None:
+        """Blackout: Output schwarz schalten."""
+        self._blackout = enabled
+        self.update()
+
+    def set_fb_alpha(self, alpha: float) -> None:
+        """Setze Freeze/Blackout Blend-Alpha (0.0=live, 1.0=voll)."""
+        self._fb_alpha = max(0.0, min(1.0, alpha))
+        self.update()
+
+    def _draw_frozen_frame(self, painter: QPainter) -> None:
+        """Zeichne frozen frame (bei alpha=1.0, skip live render)."""
+        w, h = self.width(), self.height()
+        fh, fw = self._frozen_frame.shape[:2]
+        frame = self._frozen_frame if (fh == h and fw == w) else cv2.resize(self._frozen_frame, (w, h))
+        qimg = numpy_to_qimage(frame)
+        if qimg:
+            painter.drawImage(0, 0, qimg)
 
     def _render_all_polygons(self, painter: QPainter) -> None:
         """Rendere alle Polygone dieses Output Layers - optimiert mit Buffer-Reuse."""
@@ -160,17 +264,80 @@ class OutputWindow(QWidget):
             self._render_buffer = np.zeros((h, w, 3), dtype=np.uint8)
             self._last_size = (w, h)
 
+        # Neuen State rendern
         polygons_data = []
-
         for poly, image in self._get_all_polygons_with_images():
             if image is not None:
                 polygons_data.append((image, poly.source_points, poly.output_points))
 
         if polygons_data:
             composite = composite_polygons_fast(polygons_data, (w, h), self._render_buffer)
-            qimg = numpy_to_qimage(composite)
-            if qimg:
-                painter.drawImage(0, 0, qimg)
+        else:
+            self._render_buffer[:] = 0
+            composite = self._render_buffer
+
+        # Crossfade: "from" State live re-rendern mit aktuellen Video-Frames
+        if self._crossfade_from_data is not None:
+            if self._crossfade_buffer_size != (w, h):
+                self._crossfade_buffer = np.zeros((h, w, 3), dtype=np.uint8)
+                self._crossfade_buffer_size = (w, h)
+
+            from_polygons = []
+            for media_id, src_pts, out_pts in self._crossfade_from_data:
+                image = self.images.get(media_id)
+                if image is not None:
+                    from_polygons.append((image, src_pts, out_pts))
+
+            if from_polygons:
+                from_composite = composite_polygons_fast(
+                    from_polygons, (w, h), self._crossfade_buffer)
+            else:
+                self._crossfade_buffer[:] = 0
+                from_composite = self._crossfade_buffer
+
+            composite = cv2.addWeighted(
+                from_composite, self._crossfade_from_alpha,
+                composite, self._crossfade_to_alpha, 0)
+
+        # Freeze/Blackout Fade-Blending
+        if self._fb_alpha > 0:
+            if self._blackout:
+                composite = (composite * (1.0 - self._fb_alpha)).astype(np.uint8)
+            elif self._frozen_frame is not None:
+                frozen = self._frozen_frame
+                fh, fw = frozen.shape[:2]
+                if fh != h or fw != w:
+                    frozen = cv2.resize(frozen, (w, h))
+                composite = cv2.addWeighted(
+                    composite, 1.0 - self._fb_alpha,
+                    frozen, self._fb_alpha, 0)
+
+        qimg = numpy_to_qimage(composite)
+        if qimg:
+            painter.drawImage(0, 0, qimg)
+
+    def _draw_fps_overlay(self, painter: QPainter) -> None:
+        """Zeichne FPS-Overlay oben rechts."""
+        self._fps_frame_count += 1
+        now = time.monotonic()
+        elapsed = now - self._fps_last_time
+        if elapsed >= 1.0:
+            self._fps_value = self._fps_frame_count / elapsed
+            self._fps_frame_count = 0
+            self._fps_last_time = now
+
+        text = f"FPS: {self._fps_value:.0f}"
+        font = QFont("Monospace", 12, QFont.Weight.Bold)
+        painter.setFont(font)
+        fm = painter.fontMetrics()
+        tw = fm.horizontalAdvance(text) + 12
+        th = fm.height() + 8
+
+        x = self.width() - tw - 8
+        y = 8
+        painter.fillRect(x, y, tw, th, QColor(0, 0, 0, 160))
+        painter.setPen(QColor(0, 255, 80))
+        painter.drawText(x + 6, y + fm.ascent() + 4, text)
 
     def _draw_edit_overlay(self, painter: QPainter) -> None:
         """Zeichne Edit-Overlay mit allen Polygonen."""
@@ -231,6 +398,13 @@ class OutputWindow(QWidget):
             poly, point_idx = self._find_point_at(x, y)
 
             if poly is not None and point_idx is not None:
+                # Gesperrtes Polygon: kein Punkt-Dragging
+                if poly.locked:
+                    self.selected_polygon = poly
+                    self.selected_point = None
+                    self.dragging = False
+                    self.update()
+                    return
                 self.selected_polygon = poly
                 self.selected_point = point_idx
                 self.dragging = True

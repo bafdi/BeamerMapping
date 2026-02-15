@@ -24,11 +24,12 @@ Thumbs.db
 build/
 dist/
 *.egg
-*.spec
 
 # Packaging
 icon.iconset/
 icon_base.png
+# PyInstaller generates .spec files during build, but we keep BeamerMapper.spec as a template
+# If you need to exclude generated spec files, add them specifically
 
 # Project
 *.log

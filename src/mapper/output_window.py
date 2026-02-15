@@ -55,16 +55,21 @@ class OutputWindow(QWidget):
         # Performance: Reusable render buffer
         self._render_buffer: Optional[np.ndarray] = None
         self._last_size: tuple = (0, 0)
+        
+        # Performance: Track which media IDs this output displays
+        self._displayed_media_ids: set = set()
 
     def set_output_layer(self, output_layer: OutputLayer) -> None:
         """Setze den Output Layer."""
         self.output_layer = output_layer
         self.setWindowTitle(f"Output: {output_layer.name}")
+        self._displayed_media_ids = set()  # Cache invalidieren
         self.update()
 
     def set_project(self, project: Project) -> None:
         """Setze das Projekt."""
         self.project = project
+        self._displayed_media_ids = set()  # Cache invalidieren
         self.update()
 
     def set_images(self, images: Dict[str, np.ndarray]) -> None:
@@ -79,7 +84,7 @@ class OutputWindow(QWidget):
 
     def set_layers(self, layers: List[MediaLayer]) -> None:
         """Legacy: Wird nicht mehr verwendet."""
-        pass
+        self._displayed_media_ids = set()  # Cache invalidieren
 
     def set_image_for_media(self, media_id: str, image: np.ndarray) -> None:
         """Legacy: Setze ein Bild fuer eine Media-ID."""
@@ -103,12 +108,44 @@ class OutputWindow(QWidget):
         if not self.project or not self.output_layer:
             return []
         return self.project.get_polygons_for_output_layer(self.output_layer.id)
+    
+    def get_displayed_media_ids(self) -> set:
+        """Hole alle Media-IDs die auf diesem Output angezeigt werden (cached)."""
+        # Cache leeren wenn sich Projekt geaendert hat
+        media_ids = set()
+        if not self.project:
+            self._displayed_media_ids = media_ids
+            return media_ids
+        
+        for poly in self._get_polygons_for_this_output():
+            if poly.media_layer_id:
+                media_layer = self.project.get_media_layer_by_id(poly.media_layer_id)
+                if media_layer and media_layer.visible and media_layer.media_id:
+                    media_ids.add(media_layer.media_id)
+        
+        self._displayed_media_ids = media_ids
+        return media_ids
+    
+    def invalidate_media_cache(self) -> None:
+        """Invalidiere den Cache der angezeigten Media-IDs."""
+        self._displayed_media_ids = set()
+    
+    def update_if_displays_media(self, media_id: str) -> None:
+        """Update nur wenn dieses Media auf diesem Output angezeigt wird."""
+        # Verwende cached Set wenn vorhanden, sonst neu berechnen
+        if not self._displayed_media_ids:
+            self._displayed_media_ids = self.get_displayed_media_ids()
+        
+        if media_id in self._displayed_media_ids:
+            self.update()
 
     def _get_all_polygons_with_images(self) -> List[tuple[Polygon, Optional[np.ndarray]]]:
         """Hole alle Polygone dieses Outputs mit ihren Bildern."""
         result = []
+        media_ids = set()
 
         if not self.project:
+            self._displayed_media_ids = media_ids
             return result
 
         for poly in self._get_polygons_for_this_output():
@@ -118,9 +155,12 @@ class OutputWindow(QWidget):
                 media_layer = self.project.get_media_layer_by_id(poly.media_layer_id)
                 if media_layer and media_layer.visible and media_layer.media_id:
                     image = self.images.get(media_layer.media_id)
+                    media_ids.add(media_layer.media_id)  # Cache waehrend Iteration
 
             result.append((poly, image))
-
+        
+        # Cache aktualisieren wenn wir polygons durchlaufen haben
+        self._displayed_media_ids = media_ids
         return result
 
     def _find_point_at(self, x: int, y: int) -> tuple[Optional[Polygon], Optional[int]]:
@@ -134,6 +174,10 @@ class OutputWindow(QWidget):
         return None, None
 
     def paintEvent(self, event: QPaintEvent) -> None:
+        # Optimierung: Skip rendering wenn Fenster nicht sichtbar
+        if not self.isVisible():
+            return
+            
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 

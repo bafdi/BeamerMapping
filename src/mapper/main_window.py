@@ -762,7 +762,7 @@ class MainWindow(QMainWindow):
 
         self.images[media_id] = frame
         self._update_canvas()
-        self._update_output_windows()
+        self._update_output_windows_for_media(media_id)  # Nur relevante Windows updaten
 
     def _update_transition(self) -> None:
         """Update Queue-Transitions (60 FPS Timer)."""
@@ -1752,7 +1752,15 @@ class MainWindow(QMainWindow):
         for output_id, window in self.output_windows.items():
             if window.isVisible():
                 window.images = self.images  # Direkt setzen ohne Methoden-Overhead
+                window.invalidate_media_cache()  # Cache invalidieren bei strukturellen Aenderungen
                 window.update()  # Nur repaint triggern
+    
+    def _update_output_windows_for_media(self, media_id: str) -> None:
+        """Aktualisiere nur Output-Fenster die ein bestimmtes Medium anzeigen."""
+        for output_id, window in self.output_windows.items():
+            if window.isVisible():
+                window.images = self.images  # Images immer aktuell halten
+                window.update_if_displays_media(media_id)  # Nur update wenn relevant
 
     def _update_live_sources_and_canvas(self) -> None:
         """Aktualisiere Live-Quellen (Kameras, Screens) - separater langsamer Timer."""

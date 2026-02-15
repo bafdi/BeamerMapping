@@ -1,4 +1,12 @@
-"""Optimierter Video Player - Hybrid: OpenCV (Frames) + QMediaPlayer (Audio)."""
+"""Optimierter Video Player - Hybrid: OpenCV (Frames) + QMediaPlayer (Audio).
+
+Performance Optimizations:
+- Video decoding in separate thread with precise timing
+- Audio/Video sync every 100ms with 50ms drift threshold for tight synchronization
+- Frame updates at 60 FPS with dirty flag to emit only when new frames available
+- Reduced CPU usage when paused (10ms sleep vs 5ms)
+- Zero-copy frame sharing when frame hasn't changed
+"""
 
 from typing import Optional, Dict
 from pathlib import Path
@@ -167,7 +175,7 @@ class VideoDecoder:
 
         while not self._stop_flag.is_set():
             if not self.playing:
-                time.sleep(0.005)
+                time.sleep(0.01)  # Reduced CPU usage when paused
                 continue
 
             now = time.perf_counter()

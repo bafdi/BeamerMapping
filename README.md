@@ -12,7 +12,7 @@ Projection Mapping Software for mapping media onto arbitrary surfaces via projec
 - **Side-by-Side Editing** — Source and output canvas with drag-to-map workflow
 - **Point Snapping** — Snap polygon vertices to edges/corners
 - **Drag & Drop** — Move polygons between layers
-- **Video Playback** — With audio sync
+- **Video Playback** — With audio sync (optimized for smooth 60 FPS output)
 - **Project Files** — Save/load as JSON, auto-restore last session
 
 ## Installation
@@ -52,6 +52,15 @@ Media Layer ──► Polygon ──► Output Layer
 ```
 
 Polygons connect media sources to output targets. Each polygon defines a source region (where to read from the media) and an output region (where to project). Multiple polygons can share the same media or output layer.
+
+## Performance
+
+The application is optimized for smooth real-time video mapping:
+
+- **60 FPS Output** — Projector output updates at 60 Hz for smooth video playback
+- **Tight Audio Sync** — Audio/video synchronization checked every 100ms with 50ms drift threshold
+- **Efficient Rendering** — Buffer reuse and optimized compositing pipeline
+- **Low Latency** — Live sources (cameras, screen capture) with minimal delay
 
 ## License
 

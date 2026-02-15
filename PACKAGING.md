@@ -23,7 +23,7 @@ chmod +x package_mac.sh
 ./package_mac.sh --py2app
 ```
 
-**Ergebnis:** `dist/BeamerMapper.app`
+**Ergebnis:** `dist/BeamerMapping.app`
 
 **Optional:** Starte die App
 ```bash
@@ -38,7 +38,7 @@ open dist/BeamerMapper.app
 ./package_mac.sh --onedir
 ```
 
-**Ergebnis:** `dist/BeamerMapper` (ausführbares Programm)
+**Ergebnis:** `dist/BeamerMapping` (ausführbares Programm)
 
 ### Weitere Flags (macOS & Windows)
 
@@ -63,7 +63,7 @@ package_win.bat --help
 
 1. Pushe dein Repo zu GitHub (wenn noch nicht geschehen)
    ```bash
-   git remote add origin https://github.com/DEIN_USERNAME/BeamericMapper.git
+   git remote add origin https://github.com/DEIN_USERNAME/BeamerMapping.git
    git push -u origin main
    ```
 
@@ -88,7 +88,7 @@ Nach ~10-15 Min (wenn Build erfolgreich):
 1. Gehe zu **Actions** → letzter Run
 2. Scrolle nach unten → **Artifacts**
 3. Lade herunter:
-   - `BeamericMapper-macos-app` (`.app.zip`)
+   - `BeamerMapping-macos-app` (`.app.zip`)
    - `BeamericMapper-windows-exe` (`.exe`)
 
 ---

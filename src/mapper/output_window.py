@@ -35,11 +35,8 @@ class OutputWindow(QWidget):
         self.setStyleSheet("background-color: black;")
         self.setMinimumSize(640, 480)
 
-        # Frameless window fuer clean output
-        self.setWindowFlags(
-            Qt.WindowType.Window |
-            Qt.WindowType.FramelessWindowHint
-        )
+        # Normal window - user can move, resize, and control fullscreen
+        self.setWindowFlags(Qt.WindowType.Window)
 
         # Edit-Mode - default OFF fuer clean output
         self.edit_mode = False
@@ -55,21 +52,25 @@ class OutputWindow(QWidget):
         # Performance: Reusable render buffer
         self._render_buffer: Optional[np.ndarray] = None
         self._last_size: tuple = (0, 0)
+        self._dirty: bool = True  # Flag to track if redraw is needed
 
     def set_output_layer(self, output_layer: OutputLayer) -> None:
         """Setze den Output Layer."""
         self.output_layer = output_layer
         self.setWindowTitle(f"Output: {output_layer.name}")
+        self._dirty = True
         self.update()
 
     def set_project(self, project: Project) -> None:
         """Setze das Projekt."""
         self.project = project
+        self._dirty = True
         self.update()
 
     def set_images(self, images: Dict[str, np.ndarray]) -> None:
-        """Setze alle Bilder."""
+        """Set all images and mark window for redraw."""
         self.images = images
+        self._dirty = True
         self.update()
 
     # Legacy methods for compatibility
@@ -84,13 +85,19 @@ class OutputWindow(QWidget):
     def set_image_for_media(self, media_id: str, image: np.ndarray) -> None:
         """Legacy: Setze ein Bild fuer eine Media-ID."""
         self.images[media_id] = image
+        self._dirty = True
         self.update()
 
     def set_edit_mode(self, enabled: bool) -> None:
-        """Schalte Edit-Mode um."""
+        """Toggle edit mode."""
         self.edit_mode = enabled
         self.setCursor(Qt.CursorShape.CrossCursor if enabled else Qt.CursorShape.BlankCursor)
+        self._dirty = True
         self.update()
+
+    def mark_dirty(self) -> None:
+        """Mark the window as needing a redraw."""
+        self._dirty = True
 
     def _norm_to_pixel(self, nx: float, ny: float) -> tuple[int, int]:
         return int(nx * self.width()), int(ny * self.height())
@@ -134,6 +141,11 @@ class OutputWindow(QWidget):
         return None, None
 
     def paintEvent(self, event: QPaintEvent) -> None:
+        # Skip rendering if nothing changed (performance optimization)
+        if not self._dirty and self.width() > 0 and self.height() > 0:
+            event.accept()
+            return
+            
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
@@ -150,6 +162,7 @@ class OutputWindow(QWidget):
             self._draw_edit_overlay(painter)
 
         painter.end()
+        self._dirty = False  # Reset dirty flag after rendering
 
     def _render_all_polygons(self, painter: QPainter) -> None:
         """Rendere alle Polygone dieses Output Layers - optimiert mit Buffer-Reuse."""
@@ -238,6 +251,7 @@ class OutputWindow(QWidget):
                 self.selected_polygon = None
                 self.selected_point = None
 
+            self._dirty = True
             self.update()
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
@@ -251,6 +265,7 @@ class OutputWindow(QWidget):
             ny = max(0.0, min(1.0, ny))
 
             self.selected_polygon.output_points[self.selected_point] = [nx, ny]
+            self._dirty = True
             self.update()
             self.points_changed.emit()
 
@@ -278,4 +293,5 @@ class OutputWindow(QWidget):
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
+        self._dirty = True
         self.update()

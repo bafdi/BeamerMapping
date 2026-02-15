@@ -25,13 +25,7 @@ REM Build single .exe with PyInstaller
 echo.
 echo Step 3: Building single executable with PyInstaller...
 echo This may take a few minutes...
-pyinstaller --onefile --windowed --name BeamerMapper ^
-  --add-data "presets;presets" ^
-  --add-data "docs;docs" ^
-  --hidden-import PyQt6.QtCore ^
-  --hidden-import PyQt6.QtGui ^
-  --hidden-import PyQt6.QtWidgets ^
-  run_mapper.py
+pyinstaller BeamerMapper-onefile.spec
 
 REM Check if build was successful
 if not exist "dist\BeamerMapper.exe" (

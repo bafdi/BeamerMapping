@@ -50,7 +50,6 @@ fi
 # Create DMG
 create-dmg \
   --volname "BeamerMapper Installer" \
-  --volicon "dist/BeamerMapper.app/Contents/Resources/icon.icns" \
   --window-pos 200 120 \
   --window-size 800 400 \
   --icon-size 100 \

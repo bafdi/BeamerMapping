@@ -1747,11 +1747,11 @@ class MainWindow(QMainWindow):
             window.showFullScreen()
 
     def _update_output_windows(self) -> None:
-        """Aktualisiere alle offenen Output-Fenster - optimiert mit dirty flag."""
-        # Nur images updaten wenn sie sich geaendert haben
+        """Update all open output windows - optimized with dirty flag."""
+        # Only update images when they have actually changed
         for output_id, window in self.output_windows.items():
             if window.isVisible():
-                # Nur updaten wenn Images tatsaechlich geaendert wurden
+                # Only update when images have actually changed
                 if window.images is not self.images:
                     window.images = self.images
                     window._dirty = True

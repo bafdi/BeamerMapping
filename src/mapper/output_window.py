@@ -69,7 +69,7 @@ class OutputWindow(QWidget):
 
     def set_images(self, images: Dict[str, np.ndarray]) -> None:
         """Setze alle Bilder."""
-        if self.images != images:
+        if self.images is not images:
             self.images = images
             self._dirty = True
             self.update()
@@ -140,6 +140,7 @@ class OutputWindow(QWidget):
     def paintEvent(self, event: QPaintEvent) -> None:
         # Skip rendering if nothing changed (performance optimization)
         if not self._dirty and self.width() > 0 and self.height() > 0:
+            event.accept()
             return
             
         painter = QPainter(self)

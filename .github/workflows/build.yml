@@ -1,0 +1,79 @@
+name: Build Artifacts (macOS + Windows)
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch: {}
+
+jobs:
+  build-macos:
+    name: Build macOS .app (py2app)
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Ensure package_mac.sh is executable
+        run: chmod +x ./package_mac.sh
+
+      - name: Run macOS build (py2app)
+        run: ./package_mac.sh --py2app
+
+      - name: Archive .app
+        run: |
+          if [ -d dist/BeamerMapper.app ]; then
+            ditto -c -k --sequesterRsrc --keepParent dist/BeamerMapper.app BeamerMapper.app.zip
+          else
+            echo "dist/BeamerMapper.app not found"
+            exit 1
+          fi
+
+      - name: Upload macOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: BeamerMapper-macos-app
+          path: BeamerMapper.app.zip
+
+  build-windows:
+    name: Build Windows .exe (PyInstaller)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Run Windows build (package_win.bat)
+        shell: cmd
+        run: package_win.bat
+
+      - name: Check if .exe exists
+        shell: cmd
+        run: |
+          if exist "dist\BeamerMapper.exe" (
+            echo BeamerMapper.exe found successfully
+            dir dist\BeamerMapper.exe
+          ) else (
+            echo ERROR: BeamerMapper.exe not found
+            dir dist
+            exit /b 1
+          )
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: BeamerMapper-windows-exe
+          path: dist/BeamerMapper.exe
+

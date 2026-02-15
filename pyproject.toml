@@ -1,0 +1,8 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel", "py2app>=0.27"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "BeamerMapper"
+version = "1.0.0"
+

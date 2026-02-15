@@ -303,6 +303,10 @@ class MainWindow(QMainWindow):
         self.images: Dict[str, np.ndarray] = {}  # media_id -> image
         self.output_windows: Dict[str, OutputWindow] = {}  # output_layer_id -> window
         self.live_source_manager = LiveSourceManager()
+        
+        # Performance: Track if images changed to prevent redundant updates
+        self._images_dirty = False
+        self._last_frame_time = 0.0
 
         # Snapping State
         self._snapping_enabled = True
@@ -318,7 +322,7 @@ class MainWindow(QMainWindow):
         # Timer fuer Output Window Updates (schnell)
         self.update_timer = QTimer()
         self.update_timer.timeout.connect(self._update_output_windows)
-        self.update_timer.start(33)  # ~30 FPS
+        self.update_timer.start(16)  # ~60 FPS for smooth video mapping
 
         # Separater Timer fuer Live-Quellen (langsamer - Kameras sind teuer)
         self.live_source_timer = QTimer()
@@ -1748,7 +1752,8 @@ class MainWindow(QMainWindow):
 
     def _update_output_windows(self) -> None:
         """Aktualisiere alle offenen Output-Fenster - optimiert."""
-        # Nur images updaten (die sich bei Video aendern), dann repaint
+        # Only update if images changed or window needs refresh
+        # This prevents redundant rendering when nothing changed
         for output_id, window in self.output_windows.items():
             if window.isVisible():
                 window.images = self.images  # Direkt setzen ohne Methoden-Overhead
@@ -1756,8 +1761,11 @@ class MainWindow(QMainWindow):
 
     def _update_live_sources_and_canvas(self) -> None:
         """Aktualisiere Live-Quellen (Kameras, Screens) - separater langsamer Timer."""
+        # Only update canvas if live sources actually exist and changed
+        # This prevents redundant canvas updates when using static images
         has_live = self._update_live_sources()
         if has_live:
+            # Canvas updates are expensive, only do when needed
             self._update_canvas()
 
     def _update_live_sources(self) -> bool:

@@ -261,10 +261,10 @@ class VideoPlayerWidget(QFrame):
         self.update_timer.timeout.connect(self._on_timer)
         self.update_timer.start(16)  # ~60 FPS check
 
-        # Sync Timer (weniger haeufig)
+        # Sync Timer (optimiert fuer bessere A/V sync)
         self.sync_timer = QTimer()
         self.sync_timer.timeout.connect(self._sync_audio_video)
-        self.sync_timer.start(500)  # Alle 500ms sync check
+        self.sync_timer.start(100)  # Check every 100ms for tighter sync
 
     def _apply_style(self) -> None:
         self.setStyleSheet("""
@@ -523,10 +523,10 @@ class VideoPlayerWidget(QFrame):
             # Differenz berechnen
             diff = video_pos_ms - audio_pos_ms
 
-            # OPTIMIERUNG: Strengere Logik für Sync
-            # Wenn Audio mehr als 100ms hinterher hinkt -> Seek Audio vorwärts
-            # Wenn Audio mehr als 100ms voraus ist -> Seek Audio rückwärts
-            if abs(diff) > 100:
+            # OPTIMIERUNG: Tighter sync for smooth playback
+            # Wenn Audio mehr als 50ms out of sync -> korrigieren
+            # Kleinere Toleranz verhindert wahrnehmbaren Drift
+            if abs(diff) > 50:
                 # Wir vertrauen dem Video-Thread als "Master Clock"
                 player.setPosition(video_pos_ms)
 

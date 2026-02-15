@@ -31,19 +31,21 @@ python run_mapper.py
 
 ## Building Distribution Files
 
-To create standalone executables for distribution:
+Create standalone executables for easy distribution:
 
-- **macOS (.dmg)**: See [BUILD_GUIDE.md](BUILD_GUIDE.md#macos-dmg-erstellen)
-- **Windows (.exe)**: See [BUILD_GUIDE.md](BUILD_GUIDE.md#windows-exe-erstellen)
-
-Quick build commands:
-```bash
-# macOS
-./build_macos.sh
-
-# Windows
-build_windows.bat
+### Windows (3 options)
+```cmd
+build_windows_onefile.bat    # Single .exe file (easiest)
+build_windows.bat            # Folder with .exe (faster startup)
+# Or use Inno Setup for professional installer
 ```
+
+### macOS
+```bash
+./build_macos.sh             # Creates .dmg installer
+```
+
+📖 **Full Guide:** [BUILD_SUMMARY.md](BUILD_SUMMARY.md) | [BUILD_GUIDE.md](BUILD_GUIDE.md) | [Windows Quick Start](WINDOWS_BUILD.md)
 
 ## Keyboard Shortcuts
 

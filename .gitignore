@@ -6,6 +6,8 @@ __pycache__/
 # Environments
 venv/
 .venv/
+.venv_pack/
+.venv_py2app/
 .env
 
 # IDEs
@@ -22,6 +24,11 @@ Thumbs.db
 build/
 dist/
 *.egg
+*.spec
+
+# Packaging
+icon.iconset/
+icon_base.png
 
 # Project
 *.log

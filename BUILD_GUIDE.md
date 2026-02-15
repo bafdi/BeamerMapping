@@ -19,6 +19,11 @@ Dieses Dokument erklärt, wie Sie BeamerMapper für macOS (.dmg) und Windows (.e
 - Python 3.8 oder höher installiert
 - Git installiert (um das Repository zu klonen)
 
+**Tipp:** Überprüfen Sie Ihre Umgebung mit dem Validierungsskript:
+```bash
+python validate_build_env.py
+```
+
 ### Zusätzlich für macOS
 
 - macOS Betriebssystem (für .dmg Erstellung)

@@ -17,20 +17,38 @@ cd C:\Pfad\zum\BeamerMapping
 Oder: Rechtsklick im Ordner → "Terminal hier öffnen"
 
 ### 3. Build ausführen
+
+**Wählen Sie eine Option:**
+
+**Option A: Ordner mit Dateien (Empfohlen - schneller Start)**
 ```cmd
 build_windows.bat
 ```
+Ergebnis: `dist\BeamerMapper\BeamerMapper.exe` + Dependencies
 
-Das war's! Die .exe wird erstellt in: `dist\BeamerMapper\BeamerMapper.exe`
+**Option B: Einzelne .exe Datei (Einfacher zu verteilen)**
+```cmd
+build_windows_onefile.bat
+```
+Ergebnis: `dist\BeamerMapper.exe` (eine große Datei)
+
+Das war's! Die .exe ist jetzt erstellt.
 
 ---
 
 ## 📦 Verteilung
 
-Nach dem Build haben Sie 2 Optionen:
+Nach dem Build haben Sie mehrere Optionen:
 
-### Option A: Ordner als ZIP verteilen (Einfach)
+### Option A: Einzelne .exe Datei (Am einfachsten)
 
+Wenn Sie `build_windows_onefile.bat` verwendet haben:
+- Verteilen Sie einfach `dist\BeamerMapper.exe`
+- Fertig! Nur eine Datei zum Verteilen
+
+### Option B: Ordner als ZIP verteilen
+
+Wenn Sie `build_windows.bat` verwendet haben:
 1. Rechtsklick auf den Ordner `dist\BeamerMapper`
 2. "Senden an" → "ZIP-komprimierter Ordner"
 3. Benennen Sie die ZIP-Datei z.B. `BeamerMapper-Windows.zip`
@@ -40,7 +58,7 @@ Nach dem Build haben Sie 2 Optionen:
 - ZIP entpacken
 - `BeamerMapper.exe` ausführen
 
-### Option B: Installer erstellen (Professionell)
+### Option C: Installer erstellen (Professionell)
 
 Für einen richtigen Windows-Installer:
 
@@ -56,6 +74,16 @@ Für einen richtigen Windows-Installer:
 3. **Verteilen:**
    - Nur die `BeamerMapper-Setup.exe` Datei verteilen
    - Benutzer führen den Installer aus wie jedes andere Programm
+
+---
+
+## 🔄 Welche Option soll ich wählen?
+
+| Methode | Vorteile | Nachteile | Am besten für |
+|---------|----------|-----------|---------------|
+| **Einzelne .exe** | ✅ Nur 1 Datei<br>✅ Am einfachsten | ⚠️ Größer (150-200MB)<br>⚠️ Langsamerer Start | Schnelle Weitergabe per E-Mail/Chat |
+| **Ordner (ZIP)** | ✅ Kleinere Dateien<br>✅ Schnellerer Start | ⚠️ Viele Dateien<br>⚠️ Muss entpackt werden | Wenn Dateigröße wichtig ist |
+| **Installer** | ✅ Professionell<br>✅ Startmenü/Desktop<br>✅ Uninstaller | ⚠️ Mehr Arbeit<br>⚠️ Benötigt Inno Setup | Öffentliche Distribution |
 
 ---
 

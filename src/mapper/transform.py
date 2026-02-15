@@ -432,7 +432,9 @@ def _composite_opengl(
         from .gl_renderer import GLCompositor
         _gl_compositor = GLCompositor()
 
-    return _gl_compositor.composite(polygons_data, output_size, result_buffer)
+    return _gl_compositor.composite(
+        polygons_data, output_size, result_buffer, warp_method=_warp_method
+    )
 
 
 def composite_polygons_fast(
@@ -442,16 +444,14 @@ def composite_polygons_fast(
 ) -> np.ndarray:
     """
     Dispatch-Funktion: Waehlt Backend basierend auf Einstellung.
-    OpenGL nur bei Perspective erlaubt (Shader nutzt inverse Homographie).
-    Faellt bei OpenGL-Fehler oder Bilinear Mesh automatisch auf OpenCV zurueck.
+    OpenGL unterstuetzt Perspective (Homographie-Shader) und Bilinear Mesh (GPU-Mesh-Rasterisierung).
+    Faellt bei OpenGL-Fehler automatisch auf OpenCV zurueck.
     """
-    if _renderer_backend == "opengl" and _warp_method == "perspective":
+    if _renderer_backend == "opengl":
         result = _composite_opengl(polygons_data, output_size, result_buffer)
         if result is not None:
             return result
         logger.warning("OpenGL Fallback -> OpenCV")
-    elif _renderer_backend == "opengl" and _warp_method == "bilinear_mesh":
-        logger.debug("Bilinear Mesh + OpenGL nicht unterstuetzt, nutze OpenCV")
 
     return _composite_opencv(polygons_data, output_size, result_buffer)
 

@@ -111,8 +111,7 @@ class SettingsDialog(QDialog):
         renderer = self.renderer_combo.currentData()
         if warp == "bilinear_mesh" and renderer == "opengl":
             self.warp_info_label.setText(
-                "Hinweis: Bilinear Mesh ist nicht mit OpenGL kompatibel. "
-                "Renderer faellt automatisch auf OpenCV zurueck."
+                "GPU-beschleunigtes Mesh-Warping (20\u00d720 Grid)"
             )
         elif warp == "bilinear_mesh":
             self.warp_info_label.setText(

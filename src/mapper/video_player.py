@@ -242,6 +242,9 @@ class VideoPlayerWidget(QFrame):
         self._volumes: Dict[str, float] = {}  # media_id -> volume (0.0-1.0)
         self._muted: Dict[str, bool] = {}     # media_id -> muted
 
+        # Sync: Track wann Audio gestartet wurde (Grace Period)
+        self._audio_play_start: Dict[str, float] = {}  # media_id -> time.monotonic()
+
         # Video decoders (media_id -> decoder) - OpenCV fuer Frames
         self.decoders: Dict[str, VideoDecoder] = {}
 
@@ -261,10 +264,10 @@ class VideoPlayerWidget(QFrame):
         self.update_timer.timeout.connect(self._on_timer)
         self.update_timer.start(16)  # ~60 FPS check
 
-        # Sync Timer (weniger haeufig)
+        # Sync Timer (haeufig fuer sanfte Rate-Korrektur)
         self.sync_timer = QTimer()
         self.sync_timer.timeout.connect(self._sync_audio_video)
-        self.sync_timer.start(500)  # Alle 500ms sync check
+        self.sync_timer.start(200)  # Alle 200ms fuer smooth sync
 
     def _apply_style(self) -> None:
         self.setStyleSheet("""
@@ -505,7 +508,9 @@ class VideoPlayerWidget(QFrame):
                 self.play_btn.setText("Pause" if self.is_playing else "Play")
 
     def _sync_audio_video(self) -> None:
-        """Synchronisiere Audio mit Video."""
+        """Synchronisiere Audio mit Video via sanfter Playback-Rate-Korrektur."""
+        now = time.monotonic()
+
         for media_id, decoder in self.decoders.items():
             if not decoder.playing:
                 continue
@@ -516,24 +521,44 @@ class VideoPlayerWidget(QFrame):
 
             player, _ = audio_data
 
-            # Aktuelle Zeiten holen
+            # Audio-Player muss tatsaechlich spielen
+            if player.playbackState() != QMediaPlayer.PlaybackState.PlayingState:
+                continue
+
+            # Grace Period: 1s nach Start nicht syncen (QMediaPlayer braucht Buffer-Zeit)
+            start_time = self._audio_play_start.get(media_id, 0)
+            if now - start_time < 1.0:
+                continue
+
             video_pos_ms = int(decoder.current_time * 1000)
             audio_pos_ms = player.position()
+            diff_ms = video_pos_ms - audio_pos_ms  # positiv = Video voraus
 
-            # Differenz berechnen
-            diff = video_pos_ms - audio_pos_ms
-
-            # OPTIMIERUNG: Strengere Logik für Sync
-            # Wenn Audio mehr als 100ms hinterher hinkt -> Seek Audio vorwärts
-            # Wenn Audio mehr als 100ms voraus ist -> Seek Audio rückwärts
-            if abs(diff) > 100:
-                # Wir vertrauen dem Video-Thread als "Master Clock"
-                player.setPosition(video_pos_ms)
-
-            # Loop-Sync Check:
-            # Wenn Video gerade neu gestartet ist (Zeit < 200ms) aber Audio noch am Ende ist
+            # Loop-Sync: Video gerade neu gestartet, Audio noch am Ende
             if video_pos_ms < 200 and audio_pos_ms > decoder.duration * 1000 - 1000:
                 player.setPosition(0)
+                player.setPlaybackRate(1.0)
+                self._audio_play_start[media_id] = now  # Grace Period nach Loop-Reset
+                continue
+
+            if abs(diff_ms) > 500:
+                # Grosser Drift -> Hard Seek (Loop-Restart, User-Seek etc.)
+                player.setPosition(video_pos_ms)
+                player.setPlaybackRate(1.0)
+                self._audio_play_start[media_id] = now  # Grace Period nach Seek
+            elif abs(diff_ms) > 50:
+                # Kleiner Drift -> Sanfte Rate-Korrektur statt Seek
+                # 100ms Drift -> 3% Korrektur, geclampt auf +-3%
+                correction = max(-0.03, min(0.03, diff_ms * 0.0003))
+                target_rate = 1.0 + correction
+                # Exponentiell glaetten (20% pro Tick)
+                current_rate = player.playbackRate()
+                player.setPlaybackRate(current_rate + 0.2 * (target_rate - current_rate))
+            else:
+                # Im Sync -> Rate sanft zurueck auf 1.0
+                current_rate = player.playbackRate()
+                if abs(current_rate - 1.0) > 0.002:
+                    player.setPlaybackRate(current_rate + 0.2 * (1.0 - current_rate))
 
     def _toggle_play(self) -> None:
         """Play/Pause toggle."""
@@ -550,13 +575,16 @@ class VideoPlayerWidget(QFrame):
             decoder.pause()
             if audio_data:
                 audio_data[0].pause()
+                audio_data[0].setPlaybackRate(1.0)
             self.is_playing = False
             self.play_btn.setText("Play")
         else:
             decoder.start()
             if audio_data:
+                audio_data[0].setPlaybackRate(1.0)
                 audio_data[0].setPosition(int(decoder.current_time * 1000))
                 audio_data[0].play()
+                self._audio_play_start[self.current_media_id] = time.monotonic()
             self.is_playing = True
             self.play_btn.setText("Pause")
 
@@ -572,6 +600,7 @@ class VideoPlayerWidget(QFrame):
             decoder.stop()
         if audio_data:
             audio_data[0].stop()
+            audio_data[0].setPlaybackRate(1.0)
             audio_data[0].setPosition(0)
 
         self.is_playing = False
@@ -631,7 +660,9 @@ class VideoPlayerWidget(QFrame):
         decoder.seek(position)
 
         if audio_data:
+            audio_data[0].setPlaybackRate(1.0)
             audio_data[0].setPosition(int(position * 1000))
+            self._audio_play_start[self.current_media_id] = time.monotonic()
 
     def _on_slider_moved(self, value: int) -> None:
         if not self.current_media_id or self.current_media_id not in self.decoders:
@@ -650,12 +681,15 @@ class VideoPlayerWidget(QFrame):
 
     def start_all_videos(self) -> None:
         """Starte alle geladenen Videos (fuer Autoplay)."""
+        now = time.monotonic()
         for media_id, decoder in self.decoders.items():
             if not decoder.playing:
                 decoder.start()
                 audio_data = self.audio_players.get(media_id)
                 if audio_data:
+                    audio_data[0].setPlaybackRate(1.0)
                     audio_data[0].play()
+                    self._audio_play_start[media_id] = now
 
     def cleanup(self) -> None:
         """Aufraumen."""

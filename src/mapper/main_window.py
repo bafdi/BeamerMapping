@@ -1755,8 +1755,12 @@ class MainWindow(QMainWindow):
             window.mark_dirty()
 
     def _update_output_windows(self) -> None:
-        """Update all open output windows."""
-        # Just trigger update - paintEvent will use dirty flag to skip if needed
+        """Update all open output windows.
+        
+        Schedules paint events for all visible windows. The actual rendering
+        will be skipped by paintEvent if the dirty flag is False, preventing
+        unnecessary CPU/GPU work when content hasn't changed.
+        """
         for output_id, window in self.output_windows.items():
             if window.isVisible():
                 window.update()

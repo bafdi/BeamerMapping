@@ -68,8 +68,7 @@ class OutputWindow(QWidget):
         self.update()
 
     def set_images(self, images: Dict[str, np.ndarray]) -> None:
-        """Set all images."""
-        # Always update since this is only called when we want to update
+        """Set all images and mark window for redraw."""
         self.images = images
         self._dirty = True
         self.update()

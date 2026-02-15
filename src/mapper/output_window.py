@@ -142,8 +142,10 @@ class OutputWindow(QWidget):
     def _get_all_polygons_with_images(self) -> List[tuple[Polygon, Optional[np.ndarray]]]:
         """Hole alle Polygone dieses Outputs mit ihren Bildern."""
         result = []
+        media_ids = set()
 
         if not self.project:
+            self._displayed_media_ids = media_ids
             return result
 
         for poly in self._get_polygons_for_this_output():
@@ -153,9 +155,12 @@ class OutputWindow(QWidget):
                 media_layer = self.project.get_media_layer_by_id(poly.media_layer_id)
                 if media_layer and media_layer.visible and media_layer.media_id:
                     image = self.images.get(media_layer.media_id)
+                    media_ids.add(media_layer.media_id)  # Cache waehrend Iteration
 
             result.append((poly, image))
-
+        
+        # Cache aktualisieren wenn wir polygons durchlaufen haben
+        self._displayed_media_ids = media_ids
         return result
 
     def _find_point_at(self, x: int, y: int) -> tuple[Optional[Polygon], Optional[int]]:
@@ -169,6 +174,10 @@ class OutputWindow(QWidget):
         return None, None
 
     def paintEvent(self, event: QPaintEvent) -> None:
+        # Optimierung: Skip rendering wenn Fenster nicht sichtbar
+        if not self.isVisible():
+            return
+            
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 

@@ -303,10 +303,6 @@ class MainWindow(QMainWindow):
         self.images: Dict[str, np.ndarray] = {}  # media_id -> image
         self.output_windows: Dict[str, OutputWindow] = {}  # output_layer_id -> window
         self.live_source_manager = LiveSourceManager()
-        
-        # Performance: Track if images changed to prevent redundant updates
-        self._images_dirty = False
-        self._last_frame_time = 0.0
 
         # Snapping State
         self._snapping_enabled = True
@@ -1751,9 +1747,9 @@ class MainWindow(QMainWindow):
             window.showFullScreen()
 
     def _update_output_windows(self) -> None:
-        """Aktualisiere alle offenen Output-Fenster - optimiert."""
-        # Only update if images changed or window needs refresh
-        # This prevents redundant rendering when nothing changed
+        """Aktualisiere alle offenen Output-Fenster - 60 FPS for smooth video."""
+        # Updates images reference and triggers repaint for all visible windows
+        # The paintEvent in output_window uses buffer reuse to minimize overhead
         for output_id, window in self.output_windows.items():
             if window.isVisible():
                 window.images = self.images  # Direkt setzen ohne Methoden-Overhead

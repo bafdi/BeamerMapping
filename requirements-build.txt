@@ -1,0 +1,11 @@
+# Build dependencies for creating distribution files
+# Install these when you want to build .dmg or .exe files
+#
+# Usage:
+#   pip install -r requirements-build.txt
+
+pyinstaller>=5.13.0
+
+# macOS specific (only needed on macOS for .dmg creation)
+# Note: create-dmg must be installed via Homebrew on macOS:
+#   brew install create-dmg

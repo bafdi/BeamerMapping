@@ -29,6 +29,24 @@ pip install PyQt6 opencv-python numpy mss
 python run_mapper.py
 ```
 
+## Building Distribution Files
+
+Create standalone executables for easy distribution:
+
+### Windows (3 options)
+```cmd
+build_windows_onefile.bat    # Single .exe file (easiest)
+build_windows.bat            # Folder with .exe (faster startup)
+# Or use Inno Setup for professional installer
+```
+
+### macOS
+```bash
+./build_macos.sh             # Creates .dmg installer
+```
+
+📖 **Full Guide:** [BUILD_SUMMARY.md](BUILD_SUMMARY.md) | [BUILD_GUIDE.md](BUILD_GUIDE.md) | [Windows Quick Start](WINDOWS_BUILD.md)
+
 ## Keyboard Shortcuts
 
 | Key | Action |

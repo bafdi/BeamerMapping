@@ -23,6 +23,21 @@ build/
 dist/
 *.egg
 
+# PyInstaller
+*.spec.bak
+*.pyc
+
+# Distribution files
+*.dmg
+*.exe
+*.app
+*.pkg
+*.zip
+Output/
+
+# Installer files
+installer_windows.iss.bak
+
 # Project
 *.log
 temp/
